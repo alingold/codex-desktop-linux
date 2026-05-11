@@ -127,6 +127,17 @@ function applyLinuxSetIconPatch(currentSource, iconAsset) {
 
 function applyLinuxAvatarOverlayMousePassthroughPatch(currentSource) {
   let patchedSource = currentSource;
+  const childProcessVar = requireName(currentSource, "node:child_process");
+  const i3SessionMethod =
+    "codexLinuxIsI3Session(){let e=[process.env.XDG_CURRENT_DESKTOP,process.env.DESKTOP_SESSION,process.env.I3SOCK].filter(Boolean).join(`:`).toLowerCase();return/(^|[:;/])i3([:;/.-]|$)/.test(e)}";
+  const compositorHintsMethod =
+    childProcessVar == null
+      ? "codexLinuxApplyAvatarCompositorHints(e){}"
+      : `codexLinuxApplyAvatarCompositorHints(e){if(process.platform!==\`linux\`||!this.codexLinuxIsI3Session()||this.codexLinuxAvatarCompositorHintsApplied||this.codexLinuxAvatarCompositorHintsApplying||e==null||e.isDestroyed()||!process.env.DISPLAY)return;let t=[];try{let n=e.getNativeWindowHandle?.();n!=null&&n.length>=4&&t.push(String(n.readUInt32LE(0)))}catch{}this.codexLinuxAvatarCompositorHintsApplying=!0;let n=e=>{let t=[...new Set(e)].filter(e=>/^[0-9]+$/.test(e)&&e!==\`0\`);if(t.length===0){this.codexLinuxAvatarCompositorHintsApplying=!1;return}let n=t.length,r=!1,i=()=>{n--,n===0&&(this.codexLinuxAvatarCompositorHintsApplying=!1,r&&(this.codexLinuxAvatarCompositorHintsApplied=!0))};for(let a of t)try{${childProcessVar}.execFile(\`xprop\`,[\`-id\`,a,\`-f\`,\`_GTK_FRAME_EXTENTS\`,\`32c\`,\`-set\`,\`_GTK_FRAME_EXTENTS\`,\`0, 0, 0, 0\`],{timeout:1e3},e=>{e||(r=!0),i()})}catch{i()}};try{${childProcessVar}.execFile(\`xdotool\`,[\`search\`,\`--pid\`,String(process.pid)],{timeout:1e3},(e,r)=>{n([...t,...String(r??\`\`).trim().split(/\\s+/).filter(Boolean)])})}catch{n(t)}}`;
+  const previousCompositorHintsMethod =
+    childProcessVar == null
+      ? null
+      : `codexLinuxApplyAvatarCompositorHints(e){if(process.platform!==\`linux\`||!this.codexLinuxIsI3Session()||this.codexLinuxAvatarCompositorHintsApplied||e==null||e.isDestroyed()||!process.env.DISPLAY)return;let t=null;try{let n=e.getNativeWindowHandle?.();n!=null&&n.length>=4&&(t=n.readUInt32LE(0))}catch{}if(!Number.isFinite(t)||t<=0)return;this.codexLinuxAvatarCompositorHintsApplied=!0;try{${childProcessVar}.execFile(\`xprop\`,[\`-id\`,String(t),\`-f\`,\`_GTK_FRAME_EXTENTS\`,\`32c\`,\`-set\`,\`_GTK_FRAME_EXTENTS\`,\`0, 0, 0, 0\`],{timeout:1e3},e=>{e&&(this.codexLinuxAvatarCompositorHintsApplied=!1)})}catch{this.codexLinuxAvatarCompositorHintsApplied=!1}}`;
 
   const interactivityNeedle =
     "applyPointerInteractivityPolicy(){let e=this.window;if(e==null||e.isDestroyed()){this.mousePassthroughEnabled=!1;return}let t=!this.pointerInteractive;if(this.mousePassthroughEnabled!==t){if(this.mousePassthroughEnabled=t,t){e.setIgnoreMouseEvents(!0,{forward:!0});return}e.setIgnoreMouseEvents(!1),this.refreshCursorAtCurrentMousePosition(e)}}refreshCursorAtCurrentMousePosition(e){";
@@ -134,16 +145,27 @@ function applyLinuxAvatarOverlayMousePassthroughPatch(currentSource) {
     "applyPointerInteractivityPolicy(){let e=this.window;if(e==null||e.isDestroyed()){this.mousePassthroughEnabled=!1,this.codexLinuxStopAvatarPassthroughRecovery();return}let t=!this.pointerInteractive;if(this.mousePassthroughEnabled!==t){if(this.mousePassthroughEnabled=t,t){e.setIgnoreMouseEvents(!0,{forward:!0}),this.codexLinuxStartAvatarPassthroughRecovery();return}this.codexLinuxStopAvatarPassthroughRecovery(),e.setIgnoreMouseEvents(!1),this.refreshCursorAtCurrentMousePosition(e)}else t&&this.codexLinuxStartAvatarPassthroughRecovery()}codexLinuxStopAvatarPassthroughRecovery(){this.codexLinuxAvatarPassthroughRecoveryTimer!=null&&(clearInterval(this.codexLinuxAvatarPassthroughRecoveryTimer),this.codexLinuxAvatarPassthroughRecoveryTimer=null)}codexLinuxRecoverAvatarPointerInteractivity(){this.pointerInteractive=!0,this.applyPointerInteractivityPolicy()}codexLinuxStartAvatarPassthroughRecovery(){if(process.platform!==`linux`||this.codexLinuxAvatarPassthroughRecoveryTimer!=null)return;this.codexLinuxAvatarPassthroughRecoveryTimer=setInterval(()=>{let e=this.window;if(e==null||e.isDestroyed()||!this.mousePassthroughEnabled){this.codexLinuxStopAvatarPassthroughRecovery();return}let t;try{t=this.codexLinuxIsCursorInAvatarInteractiveRegion(e)}catch{this.codexLinuxRecoverAvatarPointerInteractivity();return}t&&this.codexLinuxRecoverAvatarPointerInteractivity()},80),this.codexLinuxAvatarPassthroughRecoveryTimer.unref?.()}codexLinuxIsCursorInAvatarInteractiveRegion(e){let t=this.layout;if(t==null)return!1;let r=n.screen.getCursorScreenPoint(),i=e.getContentBounds(),a=r.x-i.x,o=r.y-i.y,s=e=>e!=null&&a>=e.left&&a<=e.left+e.width&&o>=e.top&&o<=e.top+e.height;return s(t.mascot)||s(t.tray)}refreshCursorAtCurrentMousePosition(e){";
   const previousSyncInteractivityNeedle =
     "applyPointerInteractivityPolicy(){let e=this.window;if(e==null||e.isDestroyed()){this.mousePassthroughEnabled=!1,this.codexLinuxStopAvatarPassthroughRecovery();return}process.platform===`linux`&&(this.codexLinuxStartAvatarPassthroughRecovery(),this.codexLinuxSyncAvatarPointerInteractivity(e));let t=!this.pointerInteractive;this.dragState!=null&&(t=!1);if(this.mousePassthroughEnabled!==t){if(this.mousePassthroughEnabled=t,t){e.setIgnoreMouseEvents(!0,{forward:!0});return}e.setIgnoreMouseEvents(!1),this.refreshCursorAtCurrentMousePosition(e)}}codexLinuxStopAvatarPassthroughRecovery(){this.codexLinuxAvatarPassthroughRecoveryTimer!=null&&(clearInterval(this.codexLinuxAvatarPassthroughRecoveryTimer),this.codexLinuxAvatarPassthroughRecoveryTimer=null)}codexLinuxStartAvatarPassthroughRecovery(){if(process.platform!==`linux`||this.codexLinuxAvatarPassthroughRecoveryTimer!=null)return;this.codexLinuxAvatarPassthroughRecoveryTimer=setInterval(()=>{let e=this.window;if(e==null||e.isDestroyed()||!e.isVisible()){this.codexLinuxStopAvatarPassthroughRecovery();return}this.codexLinuxSyncAvatarPointerInteractivity(e)&&this.applyPointerInteractivityPolicy()},32),this.codexLinuxAvatarPassthroughRecoveryTimer.unref?.()}codexLinuxSyncAvatarPointerInteractivity(e){if(process.platform!==`linux`||e==null||e.isDestroyed())return!1;if(this.dragState!=null){if(this.pointerInteractive)return!1;return this.pointerInteractive=!0,!0}let t;try{t=this.codexLinuxIsCursorInAvatarInteractiveRegion(e)}catch{t=!0}return this.pointerInteractive===t?!1:(this.pointerInteractive=t,!0)}codexLinuxIsCursorInAvatarInteractiveRegion(e){let t=this.layout;if(t==null)return!1;let r=n.screen.getCursorScreenPoint(),i=e.getContentBounds(),a=r.x-i.x,o=r.y-i.y;if(a<0||o<0||a>i.width||o>i.height)return!1;let s=e=>e!=null&&a>=e.left&&a<=e.left+e.width&&o>=e.top&&o<=e.top+e.height;return s(t.mascot)||s(t.tray)}refreshCursorAtCurrentMousePosition(e){";
-  const interactivityPatch =
+  const previousShapeInteractivityNeedle =
     "applyPointerInteractivityPolicy(){let e=this.window;if(e==null||e.isDestroyed()){this.mousePassthroughEnabled=!1,this.codexLinuxStopAvatarPassthroughRecovery();return}if(process.platform===`linux`&&typeof e.setShape==`function`){this.codexLinuxStopAvatarPassthroughRecovery(),this.mousePassthroughEnabled&&(this.mousePassthroughEnabled=!1,e.setIgnoreMouseEvents(!1));if(this.codexLinuxApplyAvatarInputShape(e))return}process.platform===`linux`&&(this.codexLinuxStartAvatarPassthroughRecovery(),this.codexLinuxSyncAvatarPointerInteractivity(e));let t=!this.pointerInteractive;this.dragState!=null&&(t=!1);if(this.mousePassthroughEnabled!==t){if(this.mousePassthroughEnabled=t,t){e.setIgnoreMouseEvents(!0,{forward:!0});return}e.setIgnoreMouseEvents(!1),this.refreshCursorAtCurrentMousePosition(e)}}codexLinuxStopAvatarPassthroughRecovery(){this.codexLinuxAvatarPassthroughRecoveryTimer!=null&&(clearInterval(this.codexLinuxAvatarPassthroughRecoveryTimer),this.codexLinuxAvatarPassthroughRecoveryTimer=null)}codexLinuxBuildAvatarInputShape(e){let t=this.layout;if(t==null)return null;if(this.dragState!=null){let t=e.getContentBounds();return[{x:0,y:0,width:t.width,height:t.height}]}let r=e.getContentBounds(),i=e=>{if(e==null)return null;let t=Math.max(0,e.left),n=Math.max(0,e.top),i=Math.min(r.width,e.left+e.width)-t,a=Math.min(r.height,e.top+e.height)-n;return i<=0||a<=0?null:{x:t,y:n,width:i,height:a}};return[i(t.mascot),i(t.tray)].filter(Boolean)}codexLinuxApplyAvatarInputShape(e){if(process.platform!==`linux`||e==null||e.isDestroyed()||typeof e.setShape!=`function`)return!1;let t=this.codexLinuxBuildAvatarInputShape(e);if(t==null)return!1;let n=JSON.stringify(t);if(this.codexLinuxAvatarInputShapeKey===n)return!0;try{e.setShape(t),this.codexLinuxAvatarInputShapeKey=n;return!0}catch{this.codexLinuxAvatarInputShapeKey=null;return!1}}codexLinuxStartAvatarPassthroughRecovery(){if(process.platform!==`linux`||this.codexLinuxAvatarPassthroughRecoveryTimer!=null)return;this.codexLinuxAvatarPassthroughRecoveryTimer=setInterval(()=>{let e=this.window;if(e==null||e.isDestroyed()||!e.isVisible()){this.codexLinuxStopAvatarPassthroughRecovery();return}this.codexLinuxSyncAvatarPointerInteractivity(e)&&this.applyPointerInteractivityPolicy()},32),this.codexLinuxAvatarPassthroughRecoveryTimer.unref?.()}codexLinuxSyncAvatarPointerInteractivity(e){if(process.platform!==`linux`||e==null||e.isDestroyed())return!1;if(this.dragState!=null){if(this.pointerInteractive)return!1;return this.pointerInteractive=!0,!0}let t;try{t=this.codexLinuxIsCursorInAvatarInteractiveRegion(e)}catch{t=!0}return this.pointerInteractive===t?!1:(this.pointerInteractive=t,!0)}codexLinuxIsCursorInAvatarInteractiveRegion(e){let t=this.layout;if(t==null)return!1;let r=n.screen.getCursorScreenPoint(),i=e.getContentBounds(),a=r.x-i.x,o=r.y-i.y;if(a<0||o<0||a>i.width||o>i.height)return!1;let s=e=>e!=null&&a>=e.left&&a<=e.left+e.width&&o>=e.top&&o<=e.top+e.height;return s(t.mascot)||s(t.tray)}refreshCursorAtCurrentMousePosition(e){";
+  const interactivityPatch = previousShapeInteractivityNeedle
+    .replace(
+      "codexLinuxStopAvatarPassthroughRecovery(){",
+      `${i3SessionMethod}${compositorHintsMethod}codexLinuxStopAvatarPassthroughRecovery(){`,
+    );
+  const i3SetShapeGuardPatch =
+    "if(process.platform===`linux`&&typeof e.setShape==`function`&&!this.codexLinuxIsI3Session()){";
+  const i3AlwaysInteractivePatch =
+    "if(process.platform===`linux`&&this.codexLinuxIsI3Session()){this.codexLinuxStopAvatarPassthroughRecovery(),this.codexLinuxAvatarInputShapeKey=null,this.pointerInteractive=!0,this.mousePassthroughEnabled&&(this.mousePassthroughEnabled=!1),e.setIgnoreMouseEvents(!1);return}";
 
-  if (!patchedSource.includes("codexLinuxApplyAvatarInputShape")) {
+  if (!patchedSource.includes("codexLinuxIsI3Session")) {
     if (patchedSource.includes(interactivityNeedle)) {
       patchedSource = patchedSource.replace(interactivityNeedle, interactivityPatch);
     } else if (patchedSource.includes(previousInteractivityNeedle)) {
       patchedSource = patchedSource.replace(previousInteractivityNeedle, interactivityPatch);
     } else if (patchedSource.includes(previousSyncInteractivityNeedle)) {
       patchedSource = patchedSource.replace(previousSyncInteractivityNeedle, interactivityPatch);
+    } else if (patchedSource.includes(previousShapeInteractivityNeedle)) {
+      patchedSource = patchedSource.replace(previousShapeInteractivityNeedle, interactivityPatch);
     } else if (
       patchedSource.includes("avatar-overlay") &&
       patchedSource.includes("applyPointerInteractivityPolicy(){let e=this.window")
@@ -153,6 +175,40 @@ function applyLinuxAvatarOverlayMousePassthroughPatch(currentSource) {
       );
       return currentSource;
     }
+  }
+  if (
+    patchedSource.includes("codexLinuxIsI3Session") &&
+    !patchedSource.includes("codexLinuxApplyAvatarCompositorHints")
+  ) {
+    patchedSource = patchedSource.replace(
+      `${i3SessionMethod}codexLinuxStopAvatarPassthroughRecovery(){`,
+      `${i3SessionMethod}${compositorHintsMethod}codexLinuxStopAvatarPassthroughRecovery(){`,
+    );
+  }
+  if (
+    previousCompositorHintsMethod != null &&
+    patchedSource.includes(previousCompositorHintsMethod) &&
+    !patchedSource.includes("`xdotool`,[`search`,`--pid`,String(process.pid)]")
+  ) {
+    patchedSource = patchedSource.replace(previousCompositorHintsMethod, compositorHintsMethod);
+  }
+  if (
+    patchedSource.includes("codexLinuxIsI3Session") &&
+    !patchedSource.includes(i3AlwaysInteractivePatch)
+  ) {
+    patchedSource = patchedSource.replace(
+      "return}if(process.platform===`linux`&&typeof e.setShape",
+      `return}${i3AlwaysInteractivePatch}if(process.platform===\`linux\`&&typeof e.setShape`,
+    );
+  }
+  if (
+    patchedSource.includes("codexLinuxIsI3Session") &&
+    !patchedSource.includes(i3SetShapeGuardPatch)
+  ) {
+    patchedSource = patchedSource.replace(
+      "if(process.platform===`linux`&&typeof e.setShape==`function`){",
+      i3SetShapeGuardPatch,
+    );
   }
 
   const previousStartDragPatch =
@@ -219,6 +275,55 @@ function applyLinuxAvatarOverlayMousePassthroughPatch(currentSource) {
     );
   }
 
+  const createWindowHintsNeedle =
+    "return this.window=t,this.rendererReady=this.windowManager.isWebContentsReady(t.webContents.id),";
+  const createWindowHintsPatch =
+    "return this.window=t,this.codexLinuxAvatarCompositorHintsApplied=!1,this.codexLinuxAvatarCompositorHintsApplying=!1,this.rendererReady=this.windowManager.isWebContentsReady(t.webContents.id),";
+  const previousCreateWindowCompositorPatch =
+    "return this.window=t,this.codexLinuxApplyAvatarCompositorHints(t),this.rendererReady=this.windowManager.isWebContentsReady(t.webContents.id),";
+  const previousCreateWindowCompositorResetPatch =
+    "return this.window=t,this.codexLinuxAvatarCompositorHintsApplied=!1,process.platform===`linux`&&this.codexLinuxApplyAvatarCompositorHints(t),this.rendererReady=this.windowManager.isWebContentsReady(t.webContents.id),";
+  if (
+    !patchedSource.includes("this.codexLinuxAvatarCompositorHintsApplied=!1,this.codexLinuxAvatarCompositorHintsApplying=!1,this.rendererReady") &&
+    patchedSource.includes(previousCreateWindowCompositorResetPatch)
+  ) {
+    patchedSource = patchedSource.replace(
+      previousCreateWindowCompositorResetPatch,
+      createWindowHintsPatch,
+    );
+  } else if (
+    !patchedSource.includes("this.codexLinuxAvatarCompositorHintsApplied=!1,this.codexLinuxAvatarCompositorHintsApplying=!1,this.rendererReady") &&
+    patchedSource.includes(previousCreateWindowCompositorPatch)
+  ) {
+    patchedSource = patchedSource.replace(
+      previousCreateWindowCompositorPatch,
+      createWindowHintsPatch,
+    );
+  } else if (
+    !patchedSource.includes("this.codexLinuxAvatarCompositorHintsApplied=!1,this.codexLinuxAvatarCompositorHintsApplying=!1,this.rendererReady") &&
+    patchedSource.includes(createWindowHintsNeedle)
+  ) {
+    patchedSource = patchedSource.replace(createWindowHintsNeedle, createWindowHintsPatch);
+  }
+
+  const i3TrayFallbackRegex =
+    /traySize:this\.traySize\?\?([A-Za-z_$][\w$]*)\}\);this\.anchor=/;
+  const i3TrayFallbackPatch =
+    "traySize:process.platform===`linux`&&typeof this.codexLinuxIsI3Session==`function`&&this.codexLinuxIsI3Session()?this.traySize:this.traySize??$1});this.anchor=";
+  if (
+    !patchedSource.includes(
+      "traySize:process.platform===`linux`&&typeof this.codexLinuxIsI3Session==`function`&&this.codexLinuxIsI3Session()",
+    )
+  ) {
+    if (i3TrayFallbackRegex.test(patchedSource)) {
+      patchedSource = patchedSource.replace(i3TrayFallbackRegex, i3TrayFallbackPatch);
+    } else if (patchedSource.includes("avatar-overlay")) {
+      console.warn(
+        "WARN: Could not find avatar overlay default tray layout — skipping Linux i3 hidden tray layout patch",
+      );
+    }
+  }
+
   const applyLayoutNeedle =
     "this.setWindowBounds(e,r.windowBounds),this.sendLayoutToRenderer(e)}getLayout(e){";
   const applyLayoutPatch =
@@ -241,11 +346,19 @@ function applyLinuxAvatarOverlayMousePassthroughPatch(currentSource) {
   const showWindowNeedle =
     "e.moveTop(),e.showInactive(),!t&&this.isOpen()&&this.broadcastOpenState()}broadcastOpenState(){";
   const showWindowPatch =
+    "e.moveTop(),e.showInactive(),process.platform===`linux`&&this.codexLinuxApplyAvatarCompositorHints(e),process.platform===`linux`&&this.applyPointerInteractivityPolicy(),!t&&this.isOpen()&&this.broadcastOpenState()}broadcastOpenState(){";
+  const previousShowWindowCompositorPatch =
+    "e.moveTop(),process.platform===`linux`&&this.codexLinuxApplyAvatarCompositorHints(e),e.showInactive(),process.platform===`linux`&&this.applyPointerInteractivityPolicy(),!t&&this.isOpen()&&this.broadcastOpenState()}broadcastOpenState(){";
+  const previousShowWindowI3Patch =
     "e.moveTop(),e.showInactive(),process.platform===`linux`&&this.applyPointerInteractivityPolicy(),!t&&this.isOpen()&&this.broadcastOpenState()}broadcastOpenState(){";
   const previousShowWindowPatch =
     "e.moveTop(),e.showInactive(),process.platform===`linux`&&this.codexLinuxStartAvatarPassthroughRecovery(),this.codexLinuxSyncAvatarPointerInteractivity(e)&&this.applyPointerInteractivityPolicy(),!t&&this.isOpen()&&this.broadcastOpenState()}broadcastOpenState(){";
-  if (patchedSource.includes(previousShowWindowPatch)) {
+  if (patchedSource.includes(previousShowWindowCompositorPatch)) {
+    patchedSource = patchedSource.replace(previousShowWindowCompositorPatch, showWindowPatch);
+  } else if (patchedSource.includes(previousShowWindowPatch)) {
     patchedSource = patchedSource.replace(previousShowWindowPatch, showWindowPatch);
+  } else if (patchedSource.includes(previousShowWindowI3Patch)) {
+    patchedSource = patchedSource.replace(previousShowWindowI3Patch, showWindowPatch);
   } else if (patchedSource.includes(showWindowNeedle)) {
     patchedSource = patchedSource.replace(showWindowNeedle, showWindowPatch);
   } else if (
@@ -259,11 +372,19 @@ function applyLinuxAvatarOverlayMousePassthroughPatch(currentSource) {
 
   const closedNeedle = "this.window===t&&(this.cancelMomentum(),this.window=null,";
   const closedPatch =
-    "this.window===t&&(this.codexLinuxStopAvatarPassthroughRecovery(),this.codexLinuxAvatarInputShapeKey=null,this.cancelMomentum(),this.window=null,";
+    "this.window===t&&(this.codexLinuxStopAvatarPassthroughRecovery(),this.codexLinuxAvatarInputShapeKey=null,this.codexLinuxAvatarCompositorHintsApplied=!1,this.codexLinuxAvatarCompositorHintsApplying=!1,this.cancelMomentum(),this.window=null,";
+  const previousCompositorClosedPatch =
+    "this.window===t&&(this.codexLinuxStopAvatarPassthroughRecovery(),this.codexLinuxAvatarInputShapeKey=null,this.codexLinuxAvatarCompositorHintsApplied=!1,this.cancelMomentum(),this.window=null,";
   const previousClosedPatch =
     "this.window===t&&(this.codexLinuxStopAvatarPassthroughRecovery(),this.cancelMomentum(),this.window=null,";
-  if (patchedSource.includes(previousClosedPatch)) {
+  const previousShapeClosedPatch =
+    "this.window===t&&(this.codexLinuxStopAvatarPassthroughRecovery(),this.codexLinuxAvatarInputShapeKey=null,this.cancelMomentum(),this.window=null,";
+  if (patchedSource.includes(previousCompositorClosedPatch)) {
+    patchedSource = patchedSource.replace(previousCompositorClosedPatch, closedPatch);
+  } else if (patchedSource.includes(previousClosedPatch)) {
     patchedSource = patchedSource.replace(previousClosedPatch, closedPatch);
+  } else if (patchedSource.includes(previousShapeClosedPatch)) {
+    patchedSource = patchedSource.replace(previousShapeClosedPatch, closedPatch);
   } else if (patchedSource.includes(closedNeedle)) {
     patchedSource = patchedSource.replace(closedNeedle, closedPatch);
   } else if (
