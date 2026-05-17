@@ -31,6 +31,7 @@ const {
   applyLinuxHotkeyWindowPrewarmPatch,
   applyLinuxLaunchActionArgsPatch,
   applyLinuxMenuPatch,
+  applyLinuxMultiInstanceBootstrapPatch,
   applyLinuxAppSunsetPatch,
   applyLinuxOpaqueBackgroundPatch,
   applyLinuxOpaqueWindowsDefaultPatch,
@@ -244,6 +245,7 @@ test("default core patch descriptors are grouped and unique", () => {
     "linux-explicit-ipc-quit",
     "linux-window-options",
     "linux-menu",
+    "linux-multi-instance-bootstrap-lock",
     "linux-set-icon",
     "linux-opaque-background",
     "linux-avatar-overlay-mouse-passthrough",
@@ -891,7 +893,10 @@ test("scopes close-to-tray already-patched detection to the handler", () => {
 test("adds Linux single-instance lock and second-instance handoff", () => {
   const patched = applyPatchTwice(applyLinuxSingleInstancePatch, singleInstanceBundleFixture());
 
-  assert.match(patched, /process\.platform===`linux`&&!n\.app\.requestSingleInstanceLock\(\)/);
+  assert.match(
+    patched,
+    /process\.platform===`linux`&&process\.env\.CODEX_LINUX_MULTI_LAUNCH!==`1`&&!n\.app\.requestSingleInstanceLock\(\)/,
+  );
   assert.match(patched, /n\.app\.quit\(\);return/);
   assert.match(patched, /codexLinuxBeforeQuitHandler=\(\)=>\{typeof codexLinuxMarkQuitInProgress===`function`&&codexLinuxMarkQuitInProgress\(\)\}/);
   assert.match(patched, /n\.app\.on\(`before-quit`,codexLinuxBeforeQuitHandler\)/);
@@ -899,6 +904,18 @@ test("adds Linux single-instance lock and second-instance handoff", () => {
   assert.match(patched, /codexLinuxSecondInstanceHandler/);
   assert.match(patched, /n\.app\.on\(`second-instance`,codexLinuxSecondInstanceHandler\)/);
   assert.match(patched, /n\.app\.off\(`second-instance`,codexLinuxSecondInstanceHandler\)/);
+});
+
+test("lets explicit Linux multi-instance launches bypass the bootstrap single-instance lock", () => {
+  const source =
+    "var S=t.x({isMacOS:b,isPackaged:n.app.isPackaged});if(!(!S||n.app.requestSingleInstanceLock()))t.Jr().info(`Exiting second desktop instance`,{safe:{packaged:n.app.isPackaged,platform:process.platform}}),n.app.exit(0);else{let e=t.C(x);}";
+  const patched = applyPatchTwice(applyLinuxMultiInstanceBootstrapPatch, source);
+
+  assert.match(
+    patched,
+    /if\(!\(!S\|\|process\.platform===`linux`&&process\.env\.CODEX_LINUX_MULTI_LAUNCH===`1`\|\|n\.app\.requestSingleInstanceLock\(\)\)\)/,
+  );
+  assert.match(patched, /Exiting second desktop instance/);
 });
 
 test("recognizes bootstrap-owned single-instance handoff in current bundles", () => {
@@ -1891,7 +1908,10 @@ test("patchMainBundleSource keeps non-icon patches active without an icon asset"
     patched,
     /process\.platform!==`win32`&&process\.platform!==`darwin`&&process\.platform!==`linux`\?null:/,
   );
-  assert.match(patched, /process\.platform===`linux`&&!n\.app\.requestSingleInstanceLock\(\)/);
+  assert.match(
+    patched,
+    /process\.platform===`linux`&&process\.env\.CODEX_LINUX_MULTI_LAUNCH!==`1`&&!n\.app\.requestSingleInstanceLock\(\)/,
+  );
   assert.match(patched, /\(t===`darwin`\|\|t===`linux`\)&&e\.computerUse/);
   assert.doesNotMatch(patched, /setIcon\(process\.resourcesPath\+`\/\.\.\/content\/webview\/assets\//);
   assert.doesNotMatch(

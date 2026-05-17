@@ -1230,10 +1230,16 @@ if 'LAUNCHER_ARGS=()' not in source:
     raise SystemExit("launcher must keep a sanitized argv for launcher-only flags")
 if 'configure_multi_launch_instance "$@"' not in source:
     raise SystemExit("launcher must configure multi-launch before deriving WEBVIEW_ORIGIN")
+if 'unset CODEX_LINUX_MULTI_LAUNCH' not in source.split('parse_launcher_args() {', 1)[0]:
+    raise SystemExit("launcher must clear inherited internal multi-launch markers before parsing args")
 if '$((CODEX_LINUX_WEBVIEW_PORT + 4))' not in source:
     raise SystemExit("multi-launch default range must cap the default at five ports")
 if 'CODEX_LINUX_INSTANCE_ID="port-$CODEX_LINUX_WEBVIEW_PORT"' not in multi_body:
     raise SystemExit("multi-launch must derive a stable instance id from the allocated port")
+if 'CODEX_LINUX_MULTI_LAUNCH=1' not in multi_body:
+    raise SystemExit("multi-launch must export an app-visible multi-launch marker")
+if 'export CODEX_ELECTRON_USER_DATA_DIR CODEX_LINUX_INSTANCE_ID CODEX_LINUX_MULTI_LAUNCH CODEX_LINUX_WEBVIEW_PORT' not in multi_body:
+    raise SystemExit("multi-launch must export instance identity for Electron")
 if 'APP_STATE_DIR="$base_state_dir/instances/$CODEX_LINUX_INSTANCE_ID"' not in multi_body:
     raise SystemExit("multi-launch must isolate app pid/webview state per allocated port")
 if 'LAUNCH_ACTION_RUNTIME_DIR="$XDG_RUNTIME_DIR/$CODEX_LINUX_APP_ID/instances/$CODEX_LINUX_INSTANCE_ID"' not in multi_body:
@@ -2468,7 +2474,7 @@ JS
     make_fake_extracted_asar "$extracted" "$bundle_body"
 
     node "$REPO_DIR/scripts/patch-linux-window-ui.js" "$extracted" >"$output_log" 2>&1
-    assert_contains "$extracted/.vite/build/main-test.js" 'process.platform===`linux`&&!n.app.requestSingleInstanceLock()'
+    assert_contains "$extracted/.vite/build/main-test.js" 'process.platform===`linux`&&process.env.CODEX_LINUX_MULTI_LAUNCH!==`1`&&!n.app.requestSingleInstanceLock()'
     assert_contains "$extracted/.vite/build/main-test.js" 'codexLinuxHandleLaunchActionArgs'
     assert_contains "$extracted/.vite/build/main-test.js" 'e.includes(`--new-chat`)'
     assert_contains "$extracted/.vite/build/main-test.js" 'e.includes(`--quick-chat`)'

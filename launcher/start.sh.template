@@ -36,6 +36,9 @@ MULTI_LAUNCH_ACTIVE=0
 CODEX_LINUX_INSTANCE_ID=""
 LAUNCHER_ARGS=()
 
+# Internal marker consumed by patched Electron bundles; never trust inheritance.
+unset CODEX_LINUX_MULTI_LAUNCH
+
 early_truthy_env_value() {
     case "${1:-}" in
         1|true|TRUE|yes|YES|on|ON) return 0 ;;
@@ -156,6 +159,7 @@ configure_multi_launch_instance() {
     CODEX_LINUX_WEBVIEW_PORT="$selected_port"
     CODEX_LINUX_INSTANCE_ID="port-$CODEX_LINUX_WEBVIEW_PORT"
     MULTI_LAUNCH_ACTIVE=1
+    CODEX_LINUX_MULTI_LAUNCH=1
 
     APP_STATE_DIR="$base_state_dir/instances/$CODEX_LINUX_INSTANCE_ID"
     APP_PID_FILE="$APP_STATE_DIR/app.pid"
@@ -173,7 +177,7 @@ configure_multi_launch_instance() {
     else
         CODEX_ELECTRON_USER_DATA_DIR="$APP_STATE_DIR/electron-user-data"
     fi
-    export CODEX_ELECTRON_USER_DATA_DIR
+    export CODEX_ELECTRON_USER_DATA_DIR CODEX_LINUX_INSTANCE_ID CODEX_LINUX_MULTI_LAUNCH CODEX_LINUX_WEBVIEW_PORT
 }
 
 configure_multi_launch_instance "$@"
