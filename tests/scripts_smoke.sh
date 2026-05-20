@@ -2137,6 +2137,44 @@ PY
     assert_contains "$REPO_DIR/contrib/user-local-install/install-user-local.sh" "--force-x11"
     assert_contains "$REPO_DIR/contrib/user-local-install/install-user-local.sh" "user-local.env"
     assert_contains "$REPO_DIR/contrib/user-local-install/README.md" "--force-x11"
+
+    node - "$REPO_DIR/launcher/start.sh.template" <<'NODE' || fail "Bundled backend plugin cache syncs must expose marketplace plugin links"
+const fs = require("node:fs");
+const launcher = fs.readFileSync(process.argv[2], "utf8");
+
+function functionBody(name, nextName) {
+  const pattern = new RegExp(`${name}\\(\\) \\{([\\s\\S]*?)\\n\\}\\n\\n${nextName}\\(\\) \\{`, "u");
+  const match = launcher.match(pattern);
+  if (match == null) {
+    throw new Error(`missing ${name}`);
+  }
+  return match[1];
+}
+
+function assertCacheLinks({ body, plugin }) {
+  for (const required of [
+    `marketplace_plugin_link="$marketplace_root/plugins/${plugin}"`,
+    'ln -sfn "$version" "$cache_root/latest"',
+    'ln -sfn "$cache_root/latest" "$marketplace_plugin_link"',
+  ]) {
+    if (!body.includes(required)) {
+      throw new Error(`${plugin} sync missing ${required}`);
+    }
+  }
+  if (!body.includes("needs_copy=0")) {
+    throw new Error(`${plugin} sync must refresh links on cache hits`);
+  }
+}
+
+assertCacheLinks({
+  body: functionBody("sync_computer_use_bundled_plugin_cache", "sync_read_aloud_bundled_plugin_cache"),
+  plugin: "computer-use",
+});
+assertCacheLinks({
+  body: functionBody("sync_read_aloud_bundled_plugin_cache", "resolve_browser_use_runtime_env"),
+  plugin: "read-aloud",
+});
+NODE
 }
 
 test_side_by_side_launcher_identity() {
