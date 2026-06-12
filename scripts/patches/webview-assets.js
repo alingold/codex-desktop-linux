@@ -1,9 +1,12 @@
 "use strict";
 
+const { recordStrategy } = require("./strategy-telemetry.js");
+
 const fs = require("node:fs");
 const path = require("node:path");
 
 const {
+  escapeRegExp,
   findMatchingBrace,
 } = require("./shared.js");
 
@@ -462,6 +465,7 @@ function applyLinuxAppServerFeatureEnablementPatch(currentSource) {
     "mentions_v2",
     "plugins",
     "remote_control",
+    "remote_plugin",
     "tool_call_mcp_elicitation",
     "tool_suggest",
   ]);
@@ -486,7 +490,14 @@ function applyLinuxAppServerFeatureEnablementPatch(currentSource) {
       /(for\(let ([A-Za-z_$][\w$]*) of [A-Za-z_$][\w$]*\)\{let ([A-Za-z_$][\w$]*)=[A-Za-z_$][\w$]*\[\2\];\3!=null&&\(([A-Za-z_$][\w$]*)\[\2\]=\3\)\})return \4\[([A-Za-z_$][\w$]*)\]=([A-Za-z_$][\w$]*),\4\}/u;
     const dynamicBuilderExtraMatch = currentSource.match(dynamicBuilderExtraRegex);
     if (dynamicBuilderExtraMatch != null) {
-      const [, loopBlock, , , enablementVar] = dynamicBuilderExtraMatch;
+      const [, loopBlock, , , enablementVar, featureKeyVar] = dynamicBuilderExtraMatch;
+      const featureKeyDeclaration = new RegExp(
+        `${escapeRegExp(featureKeyVar)}=\`remote_plugin\``,
+        "u",
+      );
+      if (featureKeyDeclaration.test(currentSource)) {
+        return currentSource;
+      }
       return currentSource.replace(
         dynamicBuilderExtraRegex,
         `${loopBlock}return ${enablementVar}}`,
@@ -1017,6 +1028,16 @@ function detectLatestComposerFooterControls(source) {
     });
   }
   for (const match of source.matchAll(
+    /FooterInlineControls,\{gap:`normal`,children:\[([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*)==null\?null:\(0,Q\.jsx\)\(codexLinuxRateLimitFooter,\{conversationId:\2\}\),([A-Za-z_$][\w$]*)\]\}/g,
+  )) {
+    candidates.push({
+      index: match.index,
+      firstChildVar: match[1],
+      secondChildVar: match[3],
+      conversationIdVar: match[2],
+    });
+  }
+  for (const match of source.matchAll(
     /FooterInlineControls,\{gap:`normal`,children:\[([A-Za-z_$][\w$]*),([A-Za-z_$][\w$]*),\(0,Q\.jsx\)\(codexLinuxRateLimitFooter,\{conversationId:([A-Za-z_$][\w$]*)\}\)\]\}/g,
   )) {
     candidates.push({
@@ -1118,6 +1139,33 @@ function detectCurrentPermissionsRateLimitFooterSymbols(source) {
   };
 }
 
+function replaceCodexLinuxRateLimitFooterFunction(source, replacement) {
+  const functionStart = source.indexOf("function codexLinuxRateLimitFooter(");
+  if (functionStart === -1) {
+    return source;
+  }
+
+  const headerMatch = source
+    .slice(functionStart)
+    .match(/^function codexLinuxRateLimitFooter\([^)]*\)\{/);
+  if (headerMatch == null) {
+    return source;
+  }
+  const openBrace = functionStart + headerMatch[0].length - 1;
+
+  const closeBrace = findMatchingBrace(source, openBrace);
+  if (closeBrace === -1) {
+    return source;
+  }
+
+  const existingFunction = source.slice(functionStart, closeBrace + 1);
+  if (existingFunction === replacement) {
+    return source;
+  }
+
+  return source.slice(0, functionStart) + replacement + source.slice(closeBrace + 1);
+}
+
 function applyPersistentRateLimitFooterPatch(currentSource) {
   let patchedSource = currentSource;
   const currentSymbols = detectCurrentRateLimitFooterSymbols(currentSource);
@@ -1195,6 +1243,7 @@ function applyPersistentRateLimitFooterPatch(currentSource) {
         `${currentPermissionsFooterFunction}${currentPermissionsFooterSymbols.insertionNeedle}`,
       );
     } else if (latestFooterControls != null) {
+      recordStrategy("rate-limit-footer", "upstream-latest");
       patchedSource = patchedSource.replace(
         latestFooterControls.insertionNeedle,
         `${latestFooterFunction}${latestFooterControls.insertionNeedle}`,
@@ -1215,49 +1264,45 @@ function applyPersistentRateLimitFooterPatch(currentSource) {
         `${legacyFooterFunction}${legacyInsertionNeedle}`,
       );
     }
+  } else if (currentPermissionsFooterSymbols != null && currentPermissionsFooterFunction != null) {
+    patchedSource = replaceCodexLinuxRateLimitFooterFunction(
+      patchedSource,
+      currentPermissionsFooterFunction,
+    );
   } else if (currentSymbols != null && currentFooterFunction != null) {
-    const functionStart = patchedSource.indexOf("function codexLinuxRateLimitFooter(");
-    const functionEnd = patchedSource.indexOf(currentSymbols.insertionNeedle, functionStart);
-    if (functionEnd !== -1) {
-      const existingFooterFunction = patchedSource.slice(functionStart, functionEnd);
-      if (existingFooterFunction !== currentFooterFunction) {
-        patchedSource =
-          patchedSource.slice(0, functionStart) +
-          currentFooterFunction +
-          patchedSource.slice(functionEnd);
-      }
-    }
+    patchedSource = replaceCodexLinuxRateLimitFooterFunction(
+      patchedSource,
+      currentFooterFunction,
+    );
+  } else if (currentSource.includes(currentComposerStatusNeedle)) {
+    patchedSource = replaceCodexLinuxRateLimitFooterFunction(
+      patchedSource,
+      currentComposerFooterFunction,
+    );
   } else if (latestFooterControls != null) {
-    const functionStart = patchedSource.indexOf("function codexLinuxRateLimitFooter(");
-    const functionEnd = patchedSource.indexOf(latestFooterControls.insertionNeedle, functionStart);
-    if (functionStart !== -1 && functionEnd !== -1) {
-      const existingFooterFunction = patchedSource.slice(functionStart, functionEnd);
-      if (existingFooterFunction !== latestFooterFunction) {
-        patchedSource =
-          patchedSource.slice(0, functionStart) +
-          latestFooterFunction +
-          patchedSource.slice(functionEnd);
-      }
-    }
+    patchedSource = replaceCodexLinuxRateLimitFooterFunction(
+      patchedSource,
+      latestFooterFunction,
+    );
   } else {
-    const legacyInsertionNeedle = "function TF(e){";
-    const functionStart = patchedSource.indexOf("function codexLinuxRateLimitFooter(");
-    const functionEnd = patchedSource.indexOf(legacyInsertionNeedle, functionStart);
-    if (functionStart !== -1 && functionEnd !== -1) {
-      const existingFooterFunction = patchedSource.slice(functionStart, functionEnd);
-      if (existingFooterFunction !== legacyFooterFunction) {
-        patchedSource =
-          patchedSource.slice(0, functionStart) +
-          legacyFooterFunction +
-          patchedSource.slice(functionEnd);
-      }
-    }
+    patchedSource = replaceCodexLinuxRateLimitFooterFunction(
+      patchedSource,
+      legacyFooterFunction,
+    );
   }
 
   const hasFooterFunction = patchedSource.includes("function codexLinuxRateLimitFooter(");
   if (!hasFooterFunction) {
+    if (currentSource.includes("FooterInlineControls")) {
+      // Composer-shaped bundle, but the footer controls drifted from the
+      // supported upstream shape.
+      recordStrategy("rate-limit-footer", "none");
+      console.warn("WARN: Could not insert persistent rate limit footer helper — skipping composer footer limit patch");
+      return currentSource;
+    }
     if (shouldWarnAboutMissingFooterHelper) {
       console.warn("WARN: Could not insert persistent rate limit footer helper — skipping composer footer limit patch");
+      return currentSource;
     }
     return currentSource;
   }
