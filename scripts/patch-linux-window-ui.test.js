@@ -2608,6 +2608,23 @@ test("adds Linux launch actions after current window API drift", () => {
   assert.match(patched, /let e=M\.getPrimaryWindow\(B\),t=e\?\?await M\.createFreshWindow\(`/);
 });
 
+test("adds Linux launch actions when current upstream wraps fresh window creation", () => {
+  const source = currentLaunchActionBundleFixture()
+    .replaceAll("createFreshLocalWindow", "createFreshWindow")
+    .replace(
+      "let A=Date.now(),w=()=>{}",
+      "let enabled=!0,ee=e=>enabled?M.createFreshWindow(e):Promise.resolve(null),A=Date.now(),w=()=>{}",
+    )
+    .replace("M.getPrimaryWindow()??await M.createFreshWindow(`/`)", "M.getPrimaryWindow()??await ee(`/`)")
+    .replace("r=n??await M.createFreshWindow(e)", "r=n??await ee(e)");
+
+  const patched = applyPatchTwice(applyLinuxLaunchActionArgsPatch, source);
+
+  assert.match(patched, /codexLinuxHandleLaunchActionArgs/);
+  assert.match(patched, /let n=M\.getPrimaryWindow\(B\),r=n\?\?await ee\(e\);/);
+  assert.match(patched, /let e=M\.getPrimaryWindow\(B\),t=e\?\?await ee\(`\/`\);/);
+});
+
 test("prewarms the hotkey window after startup marker drift", () => {
   const launchPatched = applyPatchTwice(
     applyLinuxLaunchActionArgsPatch,

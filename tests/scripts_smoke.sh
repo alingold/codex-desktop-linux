@@ -3044,6 +3044,12 @@ PY
     [[ "$output" == *"comp=0"* && "$output" != *"<--disable-gpu-compositing>"* ]] || fail "default Linux profile must keep GPU compositing enabled: $output"
     [[ "$output" == *"renderer_accessibility=1"* && "$output" == *"<--force-renderer-accessibility>"* ]] || fail "default Linux profile must still force renderer accessibility: $output"
 
+    output="$(env -i PATH="$PATH" HOME="$HOME" XDG_SESSION_TYPE=wayland CODEX_LINUX_RENDERING_MODE=default "$launcher_probe" probe)"
+    [[ "$output" == *"comp=1"* && "$output" == *"<--disable-gpu-compositing>"* ]] || fail "Wayland default profile must disable GPU compositing for side-panel stability: $output"
+
+    output="$(env -i PATH="$PATH" HOME="$HOME" XDG_SESSION_TYPE=wayland CODEX_LINUX_RENDERING_MODE=default CODEX_ELECTRON_DISABLE_GPU_COMPOSITING=0 "$launcher_probe" probe)"
+    [[ "$output" == *"comp=0"* && "$output" != *"<--disable-gpu-compositing>"* ]] || fail "CODEX_ELECTRON_DISABLE_GPU_COMPOSITING=0 must suppress the Wayland compositor workaround: $output"
+
     output="$(env -i PATH="$PATH" HOME="$HOME" CODEX_LINUX_RENDERING_MODE=default "$launcher_probe" probe -- --ozone-platform=x11)"
     [[ "$output" == *"electron=<--ozone-platform=x11>"* ]] || fail "pass-through ozone platform must reach Electron: $output"
     [[ "$output" != *"<--ozone-platform-hint=auto>"* ]] || fail "launcher must not add ozone hint when pass-through supplies an ozone platform: $output"
@@ -3257,6 +3263,8 @@ PY
     assert_contains "$REPO_DIR/contrib/user-local-install/files/.local/bin/codex-desktop" 'exec "${APP_DIR}/start.sh" --wayland "$@"'
     assert_contains "$REPO_DIR/contrib/user-local-install/install-user-local.sh" "--force-x11"
     assert_contains "$REPO_DIR/contrib/user-local-install/install-user-local.sh" "user-local.env"
+    assert_contains "$REPO_DIR/contrib/user-local-install/files/.local/lib/codex-desktop-linux/common.sh" "assets/codex.png"
+    assert_contains "$REPO_DIR/contrib/user-local-install/files/.local/lib/codex-desktop-linux/common.sh" "CODEX_USER_LOCAL_RECORD_DMG_FINGERPRINT"
     assert_contains "$REPO_DIR/contrib/user-local-install/README.md" "--force-x11"
 
     node - "$REPO_DIR/launcher/start.sh.template" <<'NODE' || fail "Bundled backend plugin cache syncs must expose marketplace plugin links"
@@ -5555,6 +5563,8 @@ test_user_local_install_from_update_defers_record_only_metadata() {
     local fake_bin="$workspace/bin"
     local home="$workspace/home"
     local marker="$workspace/record-only-attempted"
+    local metadata_file="$workspace/state/codex-desktop-linux/metadata.env"
+    local app_dir="$home/.local/opt/codex-desktop-linux/codex-app"
 
     mkdir -p "$fake_bin"
     cat > "$fake_bin/7z" <<'SCRIPT'
@@ -5568,6 +5578,8 @@ SCRIPT
     printf '#!/usr/bin/env bash\nexit 0\n' > "$fake_bin/systemctl"
     printf '#!/usr/bin/env bash\nexit 0\n' > "$fake_bin/update-desktop-database"
     chmod +x "$fake_bin/7z" "$fake_bin/systemctl" "$fake_bin/update-desktop-database"
+    mkdir -p "$app_dir"
+    printf '%s\n' "26.609.41114" > "$app_dir/version"
 
     PATH="$fake_bin:$PATH" \
         HOME="$home" \
@@ -5577,6 +5589,7 @@ SCRIPT
         CODEX_USER_LOCAL_SOURCE_REPO_DIR="$REPO_DIR" \
         bash "$REPO_DIR/contrib/user-local-install/install-user-local.sh" --from-update >/dev/null
     assert_file_not_exists "$marker"
+    assert_file_not_exists "$metadata_file"
 
     PATH="$fake_bin:$PATH" \
         HOME="$home" \
@@ -5585,7 +5598,9 @@ SCRIPT
         RECORD_ONLY_MARKER="$marker" \
         CODEX_USER_LOCAL_SOURCE_REPO_DIR="$REPO_DIR" \
         bash "$REPO_DIR/contrib/user-local-install/install-user-local.sh" >/dev/null
-    assert_file_exists "$marker"
+    assert_file_not_exists "$marker"
+    assert_file_exists "$metadata_file"
+    assert_contains "$metadata_file" "DMG_SHA256=unavailable"
 }
 
 test_user_local_install_preserves_persisted_x11_preference_on_refresh() {

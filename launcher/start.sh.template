@@ -236,7 +236,7 @@ Environment:
                               Auto-detect WSLg, keep generic Linux defaults, force the WSLg profile,
                               or force native Wayland with GPU compositing enabled
   CODEX_ELECTRON_DISABLE_GPU_COMPOSITING=0|1
-                              Set to 1 to add --disable-gpu-compositing for flicker workarounds
+                              Override Wayland side-panel compositing workaround; 1 forces and 0 disables
   CODEX_LAUNCHER_LOCK_WAIT_SECONDS=N
                               Seconds to wait for another launcher to leave the startup lock (default: 5)
   CODEX_FORCE_RENDERER_ACCESSIBILITY=auto|0|1
@@ -2298,6 +2298,13 @@ should_disable_gpu_compositing() {
             return 1
         fi
         echo "Invalid CODEX_ELECTRON_DISABLE_GPU_COMPOSITING='${CODEX_ELECTRON_DISABLE_GPU_COMPOSITING:-}'; using rendering profile default" >&2
+    fi
+
+    if [ "${XDG_SESSION_TYPE:-}" = "wayland" ] &&
+        [ "$ELECTRON_RENDERING_MODE" != "wayland-gpu" ] &&
+        [ "$ELECTRON_RENDERING_MODE" != "wslg" ]; then
+        echo "Detected Wayland session; adding --disable-gpu-compositing for side-panel rendering stability. Set CODEX_ELECTRON_DISABLE_GPU_COMPOSITING=0 to opt out."
+        return 0
     fi
 
     return 1
