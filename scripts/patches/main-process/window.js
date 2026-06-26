@@ -511,6 +511,23 @@ process.platform===\`linux\`?null:$1?$2($3):null,
 process.platform===\`linux\`?Promise.resolve((()=>{let __codexLinuxAboutIcon=$4.nativeImage.createFromPath(${iconPathExpression});return __codexLinuxAboutIcon.isEmpty()?null:__codexLinuxAboutIcon})()):$4.app.getFileIcon($5,{size:process.platform===\`win32\`?\`large\`:\`normal\`}).catch(()=>null)
 ]`,
     );
+    if (patchedSource === currentSource) {
+      // 26.623 reshaped the about icon promise array: the non-win32 size
+      // ternary collapsed to {size:`normal`} and a win32 nativeImage branch was
+      // added — [t?k_(i):null,n?a.nativeImage.createFromPath(i):a.app.getFileIcon(i,{size:`normal`})].
+      // Without this branch the Linux-safe icon (and the .catch on getFileIcon)
+      // never apply, so a getFileIcon rejection on Linux makes the About window
+      // builder throw before its try/catch and the dialog never opens.
+      const aboutIconPromiseRegex26623 =
+        /\[([A-Za-z_$][\w$]*)\?([A-Za-z_$][\w$]*)\(([^()]+)\):null,([A-Za-z_$][\w$]*)\?([A-Za-z_$][\w$]*)\.nativeImage\.createFromPath\(([^()]+)\):([A-Za-z_$][\w$]*)\.app\.getFileIcon\(([^()]+),\{size:`normal`\}\)\]/;
+      patchedSource = patchedSource.replace(
+        aboutIconPromiseRegex26623,
+        `[
+process.platform===\`linux\`?null:$1?$2($3):null,
+process.platform===\`linux\`?Promise.resolve((()=>{let __codexLinuxAboutIcon=$5.nativeImage.createFromPath(${iconPathExpression});return __codexLinuxAboutIcon.isEmpty()?null:__codexLinuxAboutIcon})()):$4?$5.nativeImage.createFromPath($6):$7.app.getFileIcon($8,{size:\`normal\`}).catch(()=>null)
+]`,
+      );
+    }
   } else {
     const patchedGetFileIconRegex =
       /([A-Za-z_$][\w$]*)\.app\.getFileIcon\(([^()]+),\{size:process\.platform===`win32`\?`large`:`normal`\}\)\.catch\(\(\)=>null\)/;
@@ -521,6 +538,20 @@ process.platform===\`linux\`?Promise.resolve((()=>{let __codexLinuxAboutIcon=$4.
         getFileIconRegex,
         "$1.app.getFileIcon($2,{size:process.platform===`win32`?`large`:`normal`}).catch(()=>null)",
       );
+    }
+    if (patchedSource === currentSource) {
+      // 26.623 fallback (no bundled icon): just make the reshaped getFileIcon
+      // call rejection-proof so the About window builder cannot throw on Linux.
+      const patchedGetFileIconRegex26623 =
+        /([A-Za-z_$][\w$]*)\.app\.getFileIcon\(([^()]+),\{size:`normal`\}\)\.catch\(\(\)=>null\)/;
+      if (!patchedGetFileIconRegex26623.test(patchedSource)) {
+        const getFileIconRegex26623 =
+          /([A-Za-z_$][\w$]*)\.app\.getFileIcon\(([^()]+),\{size:`normal`\}\)/;
+        patchedSource = patchedSource.replace(
+          getFileIconRegex26623,
+          "$1.app.getFileIcon($2,{size:`normal`}).catch(()=>null)",
+        );
+      }
     }
   }
 

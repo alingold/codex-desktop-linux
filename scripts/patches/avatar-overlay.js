@@ -60,7 +60,11 @@ function findAvatarOverlayClass(source) {
     const openIndex = match.index + match[0].length - 1;
     const closeIndex = findMatchingBrace(source, openIndex);
     if (closeIndex === -1) {
-      return null;
+      // findMatchingBrace cannot balance this class (e.g. it contains a regex
+      // literal with an unbalanced brace). Skip it and keep scanning instead of
+      // aborting — the avatar overlay class may appear later in the bundle.
+      classRegex.lastIndex = openIndex + 1;
+      continue;
     }
     const text = source.slice(match.index, closeIndex + 1);
     if (
