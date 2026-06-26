@@ -2193,8 +2193,8 @@ test("adds Linux avatar overlay mouse passthrough recovery", () => {
   assert.match(patched, /Number\(d\)!==t\.width/);
   assert.doesNotMatch(patched, /let\[,l,u,d,f\]=c/);
   assert.doesNotMatch(patched, /this\.codexLinuxIsI3Session\(\)\)\{this\.codexLinuxStopAvatarPassthroughRecovery\(\),this\.codexLinuxAvatarInputShapeKey=null,this\.pointerInteractive=!0,this\.mousePassthroughEnabled&&\(this\.mousePassthroughEnabled=!1\),e\.setIgnoreMouseEvents\(!1\);return\}/);
-  assert.match(patched, /if\(process\.platform===`linux`&&typeof e\.setShape==`function`\)\{/);
-  assert.match(patched, /if\(process\.platform===`linux`&&typeof e\.setShape==`function`\)\{this\.codexLinuxStartAvatarPassthroughRecovery\(\),/);
+  assert.match(patched, /if\(process\.platform===`linux`&&process\.env\.XDG_SESSION_TYPE!==`wayland`&&!process\.env\.WAYLAND_DISPLAY&&typeof e\.setShape==`function`\)\{/);
+  assert.match(patched, /if\(process\.platform===`linux`&&process\.env\.XDG_SESSION_TYPE!==`wayland`&&!process\.env\.WAYLAND_DISPLAY&&typeof e\.setShape==`function`\)\{this\.codexLinuxStartAvatarPassthroughRecovery\(\),/);
   assert.doesNotMatch(patched, /if\(process\.platform===`linux`&&typeof e\.setShape==`function`\)\{this\.codexLinuxStopAvatarPassthroughRecovery\(\),/);
   assert.doesNotMatch(patched, /typeof e\.setShape==`function`&&!this\.codexLinuxIsI3Session\(\)/);
   assert.match(patched, /if\(t==null\)return null/);
@@ -2208,7 +2208,8 @@ test("adds Linux avatar overlay mouse passthrough recovery", () => {
   assert.match(patched, /this\.dragState!=null/);
   assert.match(patched, /this\.codexLinuxIsCursorInAvatarInteractiveRegion\(e\)/);
   assert.match(patched, /__codexWindowHit=__codexX>=0&&__codexY>=0&&__codexX<=__codexBounds\.width&&__codexY<=__codexBounds\.height/);
-  assert.match(patched, /return __codexHit\(t\.mascot\)\|\|__codexHit\(t\.tray\)\|\|__codexWindowHit/);
+  assert.match(patched, /return __codexHit\(t\.mascot\)\|\|__codexHit\(t\.tray\)/);
+  assert.doesNotMatch(patched, /return __codexHit\(t\.mascot\)\|\|__codexHit\(t\.tray\)\|\|__codexWindowHit/);
   assert.doesNotMatch(patched, /let r=r\.screen\.getCursorScreenPoint\(\)/);
   assert.match(patched, /catch\{t=!0\}/);
   assert.match(patched, /this\.pointerInteractive=t/);
@@ -2242,11 +2243,12 @@ test("keeps Linux avatar overlay above the app while reply inputs are focusable"
   );
 });
 
-test("Linux avatar overlay treats visible window content as interactive fallback", () => {
+test("Linux avatar overlay interactivity is bounded to avatar regions", () => {
   const patched = applyPatchTwice(
     applyLinuxAvatarOverlayMousePassthroughPatch,
     avatarOverlayBundleFixture(),
   );
+  const cursor = { x: 5843, y: 1036 };
   const context = {
     globalThis: {},
     process: {
@@ -2266,7 +2268,7 @@ test("Linux avatar overlay treats visible window content as interactive fallback
         getName: () => "Codex",
       },
       screen: {
-        getCursorScreenPoint: () => ({ x: 5765, y: 1088 }),
+        getCursorScreenPoint: () => cursor,
         getDisplayNearestPoint: () => ({ bounds: { x: 0, y: 0, width: 800, height: 600 } }),
       },
     },
@@ -2288,6 +2290,14 @@ test("Linux avatar overlay treats visible window content as interactive fallback
     }),
     true,
   );
+  cursor.x = 5765;
+  cursor.y = 1088;
+  assert.equal(
+    controller.codexLinuxIsCursorInAvatarInteractiveRegion({
+      getContentBounds: () => ({ x: 5743, y: 936, width: 356, height: 320 }),
+    }),
+    false,
+  );
   assert.equal(
     controller.codexLinuxIsCursorInAvatarInteractiveRegion({
       getContentBounds: () => ({ x: 6000, y: 936, width: 100, height: 100 }),
@@ -2306,6 +2316,11 @@ test("Linux avatar overlay treats visible window content as interactive fallback
     { x: 57, y: 55, width: 276, height: 131 },
   ]);
   controller.pointerInteractive = true;
+  assert.deepEqual(serializeShape(controller.codexLinuxBuildAvatarInputShape(overlayWindow)), [
+    { x: 220, y: 190, width: 113, height: 122 },
+    { x: 57, y: 55, width: 276, height: 131 },
+  ]);
+  controller.dragState = {};
   assert.deepEqual(serializeShape(controller.codexLinuxBuildAvatarInputShape(overlayWindow)), [
     { x: 0, y: 0, width: 356, height: 320 },
   ]);
