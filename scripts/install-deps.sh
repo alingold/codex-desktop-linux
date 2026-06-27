@@ -395,16 +395,25 @@ bootstrap_7zz() {
         install_dir="/usr/local/bin"
     fi
 
-    # Try pinned versions newest-first with HEAD verification — no HTML parsing
+    local tmpdir
+    tmpdir="$(mktemp -d)"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$tmpdir'" EXIT
+
+    # Try pinned versions newest-first by downloading the tarball directly.
+    # Some CI/container networks handle 7-zip.org HEAD requests inconsistently,
+    # so validate the archive contents instead of relying on a separate probe.
     local -a versions=(2600 2500 2409)
     local version="" url="" candidate_url
     for candidate in "${versions[@]}"; do
         candidate_url="https://www.7-zip.org/a/7z${candidate}-linux-${sevenzip_arch}.tar.xz"
-        if curl -fsI "$candidate_url" >/dev/null 2>&1; then
+        if curl -fsL --retry 2 --retry-delay 2 -o "$tmpdir/7z.tar.xz" "$candidate_url" \
+            && tar -tf "$tmpdir/7z.tar.xz" 7zz >/dev/null 2>&1; then
             version="$candidate"
             url="$candidate_url"
             break
         fi
+        rm -f "$tmpdir/7z.tar.xz"
     done
 
     if [ -z "$url" ]; then
@@ -413,13 +422,7 @@ Tried versions: ${versions[*]}
 Install 7zz manually from https://www.7-zip.org/download.html and ensure it is on your PATH."
     fi
 
-    local tmpdir
-    tmpdir="$(mktemp -d)"
-    # shellcheck disable=SC2064
-    trap "rm -rf '$tmpdir'" EXIT
-
-    info "Downloading 7zz ${version} from $url"
-    curl -fL --progress-bar -o "$tmpdir/7z.tar.xz" "$url"
+    info "Installing 7zz ${version} from $url"
     tar -C "$tmpdir" -xf "$tmpdir/7z.tar.xz" 7zz
 
     if [ "$install_dir" = "/usr/local/bin" ]; then

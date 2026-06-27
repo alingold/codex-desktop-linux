@@ -142,6 +142,42 @@ make_stub_bin_dir() {
     mkdir -p "$bin_dir"
 }
 
+test_extract_webview_replaces_linux_icon_assets() {
+    info "Checking webview extraction applies the Linux icon asset"
+    local workspace="$TMP_DIR/webview-icon"
+    local install_dir="$workspace/install"
+    local work_dir="$workspace/work"
+    local icon_source="$workspace/codex-linux.png"
+    local assets_dir="$install_dir/content/webview/assets"
+    local output_log="$workspace/output.log"
+
+    mkdir -p "$work_dir/app-extracted/webview/assets" "$install_dir"
+    printf '%s\n' 'linux-icon' > "$icon_source"
+    printf '%s\n' 'upstream-main' > "$work_dir/app-extracted/webview/assets/app-main.png"
+    printf '%s\n' 'upstream-alt' > "$work_dir/app-extracted/webview/assets/app-alt.png"
+    printf '%s\n' '<style>--startup-background: transparent</style>' > "$work_dir/app-extracted/webview/index.html"
+
+    (
+        SCRIPT_DIR="$REPO_DIR"
+        INSTALL_DIR="$install_dir"
+        WORK_DIR="$work_dir"
+        ICON_SOURCE="$icon_source"
+        CODEX_LINUX_ICON_SOURCE="$icon_source"
+        # shellcheck disable=SC1091
+        source "$REPO_DIR/scripts/lib/webview-install.sh"
+        extract_webview "$workspace/Codex.app"
+    ) >"$output_log" 2>&1
+
+    assert_file_exists "$assets_dir/app-main.png"
+    assert_file_exists "$assets_dir/app-alt.png"
+    cmp -s "$icon_source" "$assets_dir/app-main.png" \
+        || fail "Expected extracted app-main.png to be replaced with the Linux icon"
+    cmp -s "$icon_source" "$assets_dir/app-alt.png" \
+        || fail "Expected extracted app-alt.png to be replaced with the Linux icon"
+    assert_contains "$install_dir/content/webview/index.html" "--startup-background: #1e1e1e"
+    assert_contains "$output_log" "Linux app icon applied to 2 webview asset(s)"
+}
+
 test_common_helper_sourcing() {
     info "Checking shared packaging helpers"
     local probe_file="$TMP_DIR/probe.txt"
@@ -3570,7 +3606,7 @@ EOF
     assert_contains "$REPO_DIR/contrib/user-local-install/files/.local/bin/codex-desktop" 'exec "${APP_DIR}/start.sh" --wayland "$@"'
     assert_contains "$REPO_DIR/contrib/user-local-install/install-user-local.sh" "--force-x11"
     assert_contains "$REPO_DIR/contrib/user-local-install/install-user-local.sh" "user-local.env"
-    assert_contains "$REPO_DIR/contrib/user-local-install/files/.local/lib/codex-desktop-linux/common.sh" "assets/codex.png"
+    assert_contains "$REPO_DIR/contrib/user-local-install/files/.local/lib/codex-desktop-linux/common.sh" "assets/codex-linux.png"
     assert_contains "$REPO_DIR/contrib/user-local-install/files/.local/lib/codex-desktop-linux/common.sh" "CODEX_USER_LOCAL_RECORD_DMG_FINGERPRINT"
     assert_contains "$REPO_DIR/contrib/user-local-install/README.md" "--force-x11"
 
@@ -3642,17 +3678,23 @@ test_side_by_side_launcher_identity() {
     local bin_dir="$workspace/bin"
     local help_log="$workspace/help.log"
     local symlink_help_log="$workspace/symlink-help.log"
+    local linux_icon_source="$workspace/codex-linux.png"
 
     mkdir -p "$app_dir" "$bin_dir"
+    printf '%s\n' 'linux-icon' > "$linux_icon_source"
 
     CODEX_INSTALLER_SOURCE_ONLY=1 \
     CODEX_APP_ID="codex-cua-lab" \
     CODEX_APP_DISPLAY_NAME="Codex CUA Lab" \
     CODEX_INSTALL_DIR="$app_dir" \
+    CODEX_LINUX_ICON_SOURCE="$linux_icon_source" \
     bash -c 'source "$1"; validate_app_identity; create_start_script' _ "$REPO_DIR/install.sh"
 
     assert_file_exists "$app_dir/start.sh"
     assert_file_exists "$app_dir/.codex-linux/webview-server.py"
+    assert_file_exists "$app_dir/.codex-linux/codex-cua-lab.png"
+    cmp -s "$linux_icon_source" "$app_dir/.codex-linux/codex-cua-lab.png" \
+        || fail "Expected side-by-side launcher icon to use CODEX_LINUX_ICON_SOURCE"
     assert_contains "$app_dir/start.sh" "CODEX_LINUX_APP_ID=codex-cua-lab"
     assert_contains "$app_dir/start.sh" "CODEX_LINUX_APP_DISPLAY_NAME=Codex\\\\ CUA\\\\ Lab"
     assert_contains "$app_dir/start.sh" 'CODEX_LINUX_WEBVIEW_PORT=${CODEX_WEBVIEW_PORT:-5176}'
@@ -6314,6 +6356,7 @@ EOF
 
 main() {
     test_common_helper_sourcing
+    test_extract_webview_replaces_linux_icon_assets
     test_package_payload_permission_normalization
     test_deb_builder_smoke
     test_deb_builder_rebuilds_deleted_updater_source
