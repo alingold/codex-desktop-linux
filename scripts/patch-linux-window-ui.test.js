@@ -4096,19 +4096,27 @@ test("writes only missing Linux settings fallback components after required chec
   const { extractedDir, assetsDir } = createModernNativeKeyboardShortcutsSettingsFixture();
   try {
     fs.rmSync(path.join(assetsDir, "settings-row-A.js"));
+    fs.rmSync(path.join(assetsDir, "settings-content-layout-A.js"));
 
     const { value: result, warnings } = captureWarns(() => patchKeybindsSettingsAssets(extractedDir));
 
     assert.equal(result.matched, true);
     assert.deepEqual(warnings, []);
     assert.equal(fs.existsSync(path.join(assetsDir, "linux-settings-row-linux.js")), true);
-    assert.equal(fs.existsSync(path.join(assetsDir, "linux-settings-page-linux.js")), false);
+    assert.equal(fs.existsSync(path.join(assetsDir, "linux-settings-page-linux.js")), true);
     assert.equal(fs.existsSync(path.join(assetsDir, "linux-settings-section-linux.js")), false);
     assert.equal(fs.existsSync(path.join(assetsDir, "linux-settings-group-linux.js")), false);
     assert.match(
       fs.readFileSync(path.join(assetsDir, linuxDesktopSettingsAsset), "utf8"),
       /import\{n as SettingsRow\}from"\.\/linux-settings-row-linux\.js"/,
     );
+
+    const settingsPageSource = fs.readFileSync(
+      path.join(assetsDir, "linux-settings-page-linux.js"),
+      "utf8",
+    );
+    assert.match(settingsPageSource, /h-full min-h-0 w-full overflow-y-auto/);
+    assert.match(settingsPageSource, /mx-auto flex w-full max-w-4xl flex-col gap-6 px-4 py-6/);
   } finally {
     fs.rmSync(extractedDir, { recursive: true, force: true });
   }

@@ -308,7 +308,7 @@ function linuxSettingsFallbackComponents({ jsxRuntimeAsset, jsxRuntimeExportName
     settingsPage: {
       assetName: "linux-settings-page-linux.js",
       exportName: "t",
-      source: `${jsxImport}function t({title,subtitle,children}){return $.jsxs("div",{className:"mx-auto flex w-full max-w-4xl flex-col gap-6 px-4 py-6",children:[$.jsxs("div",{className:"flex flex-col gap-1",children:[$.jsx("h2",{className:"text-xl font-semibold text-token-text-primary",children:title}),subtitle?$.jsx("p",{className:"text-sm text-token-text-secondary",children:subtitle}):null]}),children]})}export{t};\n`,
+      source: `${jsxImport}function t({title,subtitle,children}){return $.jsx("div",{className:"h-full min-h-0 w-full overflow-y-auto",children:$.jsxs("div",{className:"mx-auto flex w-full max-w-4xl flex-col gap-6 px-4 py-6",children:[$.jsxs("div",{className:"flex flex-col gap-1",children:[$.jsx("h2",{className:"text-xl font-semibold text-token-text-primary",children:title}),subtitle?$.jsx("p",{className:"text-sm text-token-text-secondary",children:subtitle}):null]}),children]})})}export{t};\n`,
     },
     settingsToggle: {
       assetName: "linux-settings-toggle-linux.js",
