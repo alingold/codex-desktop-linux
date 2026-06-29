@@ -27,7 +27,8 @@ same opt-in features across auto-updates.
 
 Feature-specific local settings can live in the same gitignored file under
 `settings.<feature-id>`. Keep tracked `feature.json` files as shipped defaults;
-do not edit them for personal preferences:
+do not edit them for personal preferences. Feature patch descriptors receive
+this object as `context.feature.settings`:
 
 ```json
 {
