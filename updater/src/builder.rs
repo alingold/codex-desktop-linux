@@ -14,11 +14,12 @@ use std::{
 use tokio::process::Command;
 use tracing::info;
 
-const REQUIRED_BUNDLE_FILES: [(&str, &str); 17] = [
+const REQUIRED_BUNDLE_FILES: [(&str, &str); 19] = [
     ("Cargo.toml", "Cargo.toml"),
     ("Cargo.lock", "Cargo.lock"),
     ("computer-use-linux", "computer-use-linux"),
     ("read-aloud-linux", "read-aloud-linux"),
+    ("record-replay-linux", "record-replay-linux"),
     ("updater", "updater"),
     (
         "plugins/openai-bundled/plugins/computer-use",
@@ -40,6 +41,7 @@ const REQUIRED_BUNDLE_FILES: [(&str, &str); 17] = [
     ("scripts/lib", "scripts/lib"),
     ("packaging/linux", "packaging/linux"),
     ("assets/codex.png", "assets/codex.png"),
+    ("assets/codex-linux.png", "assets/codex-linux.png"),
     ("linux-features", "linux-features"),
 ];
 const OPTIONAL_BUNDLE_FILES: [(&str, &str); 5] = [
@@ -514,7 +516,7 @@ touch "${DIST_DIR_OVERRIDE}/codex-desktop-${VER}-1-x86_64.pkg.tar.zst"
     fn write_fake_computer_use_bundle(root: &Path) -> Result<()> {
         fs::write(
             root.join("Cargo.toml"),
-            b"[workspace]\nmembers = [\"computer-use-linux\", \"read-aloud-linux\", \"updater\"]\n",
+            b"[workspace]\nmembers = [\"computer-use-linux\", \"read-aloud-linux\", \"record-replay-linux\", \"updater\"]\n",
         )?;
         fs::write(root.join("Cargo.lock"), b"# fake lock\n")?;
         fs::create_dir_all(root.join("computer-use-linux/src"))?;
@@ -532,6 +534,15 @@ touch "${DIST_DIR_OVERRIDE}/codex-desktop-${VER}-1-x86_64.pkg.tar.zst"
             b"[package]\nname = \"codex-read-aloud-linux\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
         )?;
         fs::write(root.join("read-aloud-linux/src/main.rs"), b"fn main() {}\n")?;
+        fs::create_dir_all(root.join("record-replay-linux/src"))?;
+        fs::write(
+            root.join("record-replay-linux/Cargo.toml"),
+            b"[package]\nname = \"codex-record-replay-linux\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )?;
+        fs::write(
+            root.join("record-replay-linux/src/main.rs"),
+            b"fn main() {}\n",
+        )?;
         fs::create_dir_all(root.join("updater/src"))?;
         fs::write(
             root.join("updater/Cargo.toml"),
@@ -600,6 +611,7 @@ touch "${DIST_DIR_OVERRIDE}/codex-desktop-${VER}-1-x86_64.pkg.tar.zst"
             b"# fake webview server\n",
         )?;
         fs::write(bundle_root.join("assets/codex.png"), b"png")?;
+        fs::write(bundle_root.join("assets/codex-linux.png"), b"linux png")?;
         fs::write(
             bundle_root.join("packaging/linux/control"),
             "Package: codex",
@@ -748,6 +760,14 @@ fi
             .exists());
         assert!(artifacts
             .workspace_dir
+            .join("builder/assets/codex-linux.png")
+            .exists());
+        assert!(artifacts
+            .workspace_dir
+            .join("builder/record-replay-linux/Cargo.toml")
+            .exists());
+        assert!(artifacts
+            .workspace_dir
             .join("builder/CHANGELOG.md")
             .exists());
         assert!(artifacts
@@ -834,6 +854,7 @@ fi
             b"[Unit]\nDescription=Codex Update Manager\n",
         )?;
         fs::write(source_root.join("assets/codex.png"), b"png")?;
+        fs::write(source_root.join("assets/codex-linux.png"), b"linux png")?;
 
         copy_builder_bundle(&source_root, &destination_root)?;
 
@@ -847,7 +868,9 @@ fi
             .exists());
         assert!(destination_root.join("computer-use-linux").exists());
         assert!(destination_root.join("read-aloud-linux").exists());
+        assert!(destination_root.join("record-replay-linux").exists());
         assert!(destination_root.join("updater").exists());
+        assert!(destination_root.join("assets/codex-linux.png").exists());
         assert!(destination_root
             .join("plugins/openai-bundled/plugins/computer-use/.mcp.json")
             .exists());
