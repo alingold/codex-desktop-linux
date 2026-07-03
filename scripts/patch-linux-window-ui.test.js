@@ -3,6 +3,7 @@
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
 const { spawnSync } = require("node:child_process");
+const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -34,6 +35,7 @@ const {
   applyLinuxChromeExtensionStatusPatch,
   applyLinuxChromeNativeHostRuntimePatch,
   applyLinuxChromePluginAutoInstallPatch,
+  applyLinuxTerminalUserPathPatch,
   applyLinuxAppUpdaterBridgePatch,
   applyLinuxAppUpdaterMenuPatch,
   applyLinuxAboutDialogPatch,
@@ -41,6 +43,7 @@ const {
   applyLinuxExplicitIpcQuitPatch,
   applyLinuxExplicitQuitPromptBypassPatch,
   applyLinuxExplicitTrayQuitPatch,
+  applyLinuxExternalOpenEnvPatch,
   applyLinuxFileManagerPatch,
   applyLinuxGitOriginsSourceFallbackPatch,
   applyLinuxWorkerFileManagerPatch,
@@ -139,6 +142,8 @@ const workerBundlePrefix =
   "let i=require(`node:path`),o=require(`node:fs`);";
 const fileManagerBundle =
   "var lu=jl({id:`fileManager`,label:`Finder`,icon:`apps/finder.png`,kind:`fileManager`,darwin:{detect:()=>`open`,args:e=>il(e)},win32:{label:`File Explorer`,icon:`apps/file-explorer.png`,detect:uu,args:e=>il(e),open:async({path:e})=>du(e)}});function uu(){}";
+const terminalEnvBundle =
+  "var Q0=`xterm-256color`;var t={ $r(e){return e} };var Backend=class{isLocalTerminalSession(e){return e?.type===`local`}async getWorktreeShellEnvironmentForCwd(e){return null}async buildTerminalEnv(e,n,r){let i={...process.env};if(n!=null&&(i.CODEX_APP_TITLE=n),this.isLocalTerminalSession(r)){let t=await this.getWorktreeShellEnvironmentForCwd(e);if(t!=null){for(let e of t.exclude)delete i[e];Object.assign(i,t.set)}}return process.platform!==`win32`&&(i.TERM=Q0,delete i.TERMINFO,delete i.TERMINFO_DIRS),t.$r(i)}};";
 const alreadyOpaqueBackgroundBundle =
   "process.platform===`linux`?{backgroundColor:e?t:n,backgroundMaterial:null}:{backgroundColor:r,backgroundMaterial:null}";
 const opaqueBackgroundBundleWithDriftingGw =
@@ -720,6 +725,7 @@ test("default core patch descriptors are grouped and unique", () => {
     "linux-chat-search-hydration",
     "linux-file-manager",
     "linux-worker-file-manager",
+    "linux-terminal-user-path",
     "linux-tray",
     "linux-build-info-tray",
     "linux-single-instance",
@@ -739,6 +745,7 @@ test("default core patch descriptors are grouped and unique", () => {
     "linux-launch-actions",
     "linux-hotkey-window-prewarm",
     "linux-git-origins-source-fallback",
+    "linux-external-open-env",
     "linux-xdg-documents-dir",
     "linux-projectless-xdg-documents-dir",
     "linux-workspace-root-open-targets",
@@ -792,13 +799,16 @@ test("default core patch descriptors are grouped and unique", () => {
     descriptors.find((descriptor) => descriptor.id === "linux-computer-use-native-desktop-apps")?.ciPolicy,
     "opt-in",
   );
+  assert.equal(
+    descriptors.find((descriptor) => descriptor.id === "linux-terminal-user-path")?.ciPolicy,
+    "optional",
+  );
   for (const id of [
     "linux-window-options",
     "linux-native-titlebar",
     "linux-opaque-background",
     "linux-avatar-overlay-mouse-passthrough",
     "linux-tray",
-    "linux-workspace-root-open-targets",
   ]) {
     assert.equal(
       descriptors.find((descriptor) => descriptor.id === id)?.ciPolicy,
@@ -806,6 +816,16 @@ test("default core patch descriptors are grouped and unique", () => {
       `${id} should block upstream builds when it drifts`,
     );
   }
+  assert.equal(
+    descriptors.find((descriptor) => descriptor.id === "linux-external-open-env")?.ciPolicy,
+    "optional",
+    "external URL handoff drift should warn without blocking install/rebuild",
+  );
+  assert.equal(
+    descriptors.find((descriptor) => descriptor.id === "linux-workspace-root-open-targets")?.ciPolicy,
+    "optional",
+    "workspace-root open targets should not block app builds when upstream removes the File Manager insertion point",
+  );
 
   const descriptorOrder = new Map(descriptors.map((descriptor) => [descriptor.id, descriptor.order]));
   assert.ok(
@@ -1459,6 +1479,54 @@ test("adds Linux file manager support to the worker open target registry", () =>
   assert.match(patched, /import\(`electron`\)\)\.shell\.openPath\(t\)/);
 });
 
+test("restores the user PATH for Linux local terminal sessions", () => {
+  const source = `${mainBundlePrefix}${terminalEnvBundle}`;
+
+  const patched = applyPatchTwice(applyLinuxTerminalUserPathPatch, source);
+
+  assert.match(patched, /function codexLinuxRestoreUserTerminalPath/);
+  assert.match(patched, /CODEX_LINUX_USER_PATH/);
+  assert.match(
+    patched,
+    /process\.platform===`linux`&&this\.isLocalTerminalSession\(r\)&&codexLinuxRestoreUserTerminalPath\(i\)/,
+  );
+  assert.doesNotMatch(patched, /CODEX_LINUX_USER_PATH;n\(i\)/);
+
+  const helperSource = patched.match(
+    /function codexLinuxRestoreUserTerminalPath\(e\)\{[\s\S]*?return e\}/,
+  )?.[0];
+  assert.ok(helperSource);
+
+  const managedRuntime = "/opt/codex-desktop/resources/node-runtime";
+  const managedBin = `${managedRuntime}/bin`;
+  const runHelper = (terminalPath, processPath = `${managedBin}:/usr/bin:/bin`) => {
+    const terminalEnv = {
+      PATH: terminalPath,
+      CODEX_LINUX_USER_PATH: "/usr/bin:/bin",
+    };
+    vm.runInNewContext(`${helperSource};codexLinuxRestoreUserTerminalPath(terminalEnv);`, {
+      process: {
+        env: {
+          CODEX_LINUX_USER_PATH: "/usr/bin:/bin",
+          CODEX_MANAGED_NODE_RUNTIME_DIR: managedRuntime,
+          PATH: processPath,
+        },
+      },
+      terminalEnv,
+    });
+    return terminalEnv;
+  };
+
+  assert.deepEqual(runHelper(`${managedBin}:/usr/bin:/bin`), { PATH: "/usr/bin:/bin" });
+  assert.deepEqual(
+    runHelper(`/worktree/bin:${managedBin}:/custom/bin`, `${managedBin}:/usr/bin:/bin`),
+    { PATH: "/worktree/bin:/usr/bin:/bin:/custom/bin" },
+  );
+  assert.deepEqual(runHelper("/worktree/bin:/custom/bin"), {
+    PATH: "/worktree/bin:/custom/bin",
+  });
+});
+
 test("patchExtractedApp patches worker file manager support", () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-worker-file-manager-"));
   try {
@@ -2110,38 +2178,51 @@ test("removes native title tooltip from the thread side panel toolbar action", (
   assert.doesNotMatch(patched, /title:i/);
 });
 
-test("adds Linux menu hiding next to Windows removeMenu calls", () => {
+test("removes the Linux menu next to Windows removeMenu calls", () => {
   const source = "process.platform===`win32`&&k.removeMenu(),";
   const patched = applyPatchTwice(applyLinuxMenuPatch, source);
 
   assert.equal(
     patched,
-    "process.platform===`linux`&&k.setMenuBarVisibility(!1),process.platform===`win32`&&k.removeMenu(),",
+    "process.platform===`linux`&&k.removeMenu(),process.platform===`win32`&&k.removeMenu(),",
   );
 });
 
 test("patches remaining Windows menu snippets when another copy is already Linux-patched", () => {
   const windowsMenuSnippet = "process.platform===`win32`&&k.removeMenu(),";
-  const linuxMenuPatch = "process.platform===`linux`&&k.setMenuBarVisibility(!1),";
+  const linuxMenuPatch = "process.platform===`linux`&&k.removeMenu(),";
   const source = `${linuxMenuPatch}${windowsMenuSnippet}function createSecondWindow(){${windowsMenuSnippet}}`;
 
   const patched = applyPatchTwice(applyLinuxMenuPatch, source);
 
-  assert.equal((patched.match(/setMenuBarVisibility\(!1\)/g) ?? []).length, 2);
+  assert.equal((patched.match(/removeMenu\(\)/g) ?? []).length, 4);
   assert.match(
     patched,
-    /function createSecondWindow\(\)\{process\.platform===`linux`&&k\.setMenuBarVisibility\(!1\),process\.platform===`win32`&&k\.removeMenu\(\),\}/,
+    /function createSecondWindow\(\)\{process\.platform===`linux`&&k\.removeMenu\(\),process\.platform===`win32`&&k\.removeMenu\(\),\}/,
   );
 });
 
-test("recognizes the frameless-titlebar upgraded menu snippet as already applied", () => {
+test("upgrades legacy Linux menu snippets to remove the menu", () => {
   const source =
     "process.platform===`linux`&&(k.setMenuBarVisibility(!1),k.removeMenu?.()),process.platform===`win32`&&k.removeMenu(),";
 
   const patched = applyPatchTwice(applyLinuxMenuPatch, source);
 
+  assert.equal(
+    patched,
+    "process.platform===`linux`&&k.removeMenu(),process.platform===`win32`&&k.removeMenu(),",
+  );
+  assert.doesNotMatch(patched, /setMenuBarVisibility/);
+});
+
+test("recognizes the Linux removeMenu snippet as already applied", () => {
+  const source =
+    "process.platform===`linux`&&k.removeMenu(),process.platform===`win32`&&k.removeMenu(),";
+
+  const patched = applyPatchTwice(applyLinuxMenuPatch, source);
+
   assert.equal(patched, source);
-  assert.equal((patched.match(/setMenuBarVisibility\(!1\)/g) ?? []).length, 1);
+  assert.equal((patched.match(/process\.platform===`linux`&&k\.removeMenu\(\),/g) ?? []).length, 1);
 });
 
 test("recognizes already-applied Linux opaque background patch", () => {
@@ -4031,6 +4112,16 @@ test("keeps Linux desktop toggles visible with native Keyboard Shortcuts", () =>
     assert.match(linuxDesktopSource, /Linux source commit/);
     assert.match(linuxDesktopSource, /Copy commit/);
     assert.match(linuxDesktopSource, /Open on GitHub/);
+    assert.match(linuxDesktopSource, /"Linux source commit":\[\{key:"copyCommit"/);
+    assert.match(linuxDesktopSource, /"Generated":\[\{key:"refresh"/);
+    assert.match(linuxDesktopSource, /"Metadata file":\[\{key:"details"/);
+    assert.match(linuxDesktopSource, /control:null/);
+    assert.match(linuxDesktopSource, /cursor-pointer/);
+    assert.match(linuxDesktopSource, /disabled:cursor-not-allowed/);
+    assert.doesNotMatch(
+      linuxDesktopSource,
+      /control:\$\.jsxs\("div",\{className:"flex flex-wrap items-center justify-end gap-2"/,
+    );
     assert.doesNotMatch(linuxDesktopSource, /Source commit URL/);
     assert.match(linuxDesktopSource, /href:url/);
     assert.match(linuxDesktopSource, /codex-linux-get-build-info/);
@@ -4038,6 +4129,14 @@ test("keeps Linux desktop toggles visible with native Keyboard Shortcuts", () =>
     assert.match(linuxDesktopSource, /codex-linux-auto-update-on-exit/);
     assert.match(linuxDesktopSource, /import\{r as SettingsRow\}from"\.\/settings-row-A\.js"/);
     assert.match(linuxDesktopSource, /import\{z as __post\}from"\.\/shared-app-A\.js"/);
+    assert.match(linuxDesktopSource, /import\{t as Toggle\}from"\.\/toggle-A\.js"/);
+    assert.match(
+      linuxDesktopSource,
+      /control:\$\.jsx\(Toggle,\{checked:value,disabled:isLoading,onChange:update,ariaLabel:label\}\)/,
+    );
+    assert.doesNotMatch(linuxDesktopSource, /function LinuxSwitch/);
+    assert.doesNotMatch(linuxDesktopSource, /bg-token-text-primary/);
+    assert.doesNotMatch(linuxDesktopSource, /translate-x-4/);
 
     assert.match(
       fs.readFileSync(path.join(assetsDir, "settings-sections-A.js"), "utf8"),
@@ -4088,19 +4187,102 @@ test("writes only missing Linux settings fallback components after required chec
   const { extractedDir, assetsDir } = createModernNativeKeyboardShortcutsSettingsFixture();
   try {
     fs.rmSync(path.join(assetsDir, "settings-row-A.js"));
+    fs.rmSync(path.join(assetsDir, "settings-content-layout-A.js"));
 
     const { value: result, warnings } = captureWarns(() => patchKeybindsSettingsAssets(extractedDir));
 
     assert.equal(result.matched, true);
     assert.deepEqual(warnings, []);
     assert.equal(fs.existsSync(path.join(assetsDir, "linux-settings-row-linux.js")), true);
-    assert.equal(fs.existsSync(path.join(assetsDir, "linux-settings-page-linux.js")), false);
+    assert.equal(fs.existsSync(path.join(assetsDir, "linux-settings-page-linux.js")), true);
     assert.equal(fs.existsSync(path.join(assetsDir, "linux-settings-section-linux.js")), false);
     assert.equal(fs.existsSync(path.join(assetsDir, "linux-settings-group-linux.js")), false);
     assert.match(
       fs.readFileSync(path.join(assetsDir, linuxDesktopSettingsAsset), "utf8"),
       /import\{n as SettingsRow\}from"\.\/linux-settings-row-linux\.js"/,
     );
+
+    const settingsPageSource = fs.readFileSync(
+      path.join(assetsDir, "linux-settings-page-linux.js"),
+      "utf8",
+    );
+    assert.match(settingsPageSource, /h-full min-h-0 w-full overflow-y-auto/);
+    assert.match(settingsPageSource, /mx-auto flex w-full max-w-4xl flex-col gap-6 px-4 py-6/);
+  } finally {
+    fs.rmSync(extractedDir, { recursive: true, force: true });
+  }
+});
+
+test("uses a themed fallback toggle when upstream settings toggle is unavailable", () => {
+  const { extractedDir, assetsDir } = createModernNativeKeyboardShortcutsSettingsFixture();
+  try {
+    fs.rmSync(path.join(assetsDir, "toggle-A.js"));
+
+    const { value: result, warnings } = captureWarns(() => patchKeybindsSettingsAssets(extractedDir));
+
+    assert.equal(result.matched, true);
+    assert.deepEqual(warnings, []);
+    assert.equal(fs.existsSync(path.join(assetsDir, "linux-settings-toggle-linux.js")), true);
+
+    const linuxDesktopSource = fs.readFileSync(
+      path.join(assetsDir, linuxDesktopSettingsAsset),
+      "utf8",
+    );
+    assert.match(linuxDesktopSource, /import\{t as Toggle\}from"\.\/linux-settings-toggle-linux\.js"/);
+    assert.match(
+      linuxDesktopSource,
+      /control:\$\.jsx\(Toggle,\{checked:value,disabled:isLoading,onChange:update,ariaLabel:label\}\)/,
+    );
+    assert.doesNotMatch(linuxDesktopSource, /function LinuxSwitch/);
+    assert.doesNotMatch(linuxDesktopSource, /bg-token-text-primary/);
+    assert.doesNotMatch(linuxDesktopSource, /translate-x-4/);
+
+    const toggleSource = fs.readFileSync(
+      path.join(assetsDir, "linux-settings-toggle-linux.js"),
+      "utf8",
+    );
+    assert.match(toggleSource, /--color-token-radio-active-foreground/);
+    assert.match(toggleSource, /width:"32px"/);
+    assert.match(toggleSource, /height:"20px"/);
+    assert.match(toggleSource, /translateX\(12px\)/);
+
+    const secondResult = patchKeybindsSettingsAssets(extractedDir);
+    assert.equal(secondResult.matched, true);
+    assert.equal(secondResult.changed, 0);
+  } finally {
+    fs.rmSync(extractedDir, { recursive: true, force: true });
+  }
+});
+
+test("infers the current upstream settings toggle from settings row controls", () => {
+  const { extractedDir, assetsDir } = createModernNativeKeyboardShortcutsSettingsFixture();
+  try {
+    fs.rmSync(path.join(assetsDir, "toggle-A.js"));
+    fs.writeFileSync(path.join(assetsDir, "shared-toggle-A.js"), "function vn(){}export{vn};", "utf8");
+    fs.writeFileSync(
+      path.join(assetsDir, "general-settings-A.js"),
+      'import{vn as Fe}from"./shared-toggle-A.js";function GeneralSettings(){return (0,Y.jsx)(W,{label:"Default permissions",description:"",control:(0,Y.jsx)(Fe,{checked:!0,disabled:!0,onChange:e=>{save(e)},ariaLabel:"Default permissions"})})}export{GeneralSettings};',
+      "utf8",
+    );
+
+    const { value: result, warnings } = captureWarns(() => patchKeybindsSettingsAssets(extractedDir));
+
+    assert.equal(result.matched, true);
+    assert.deepEqual(warnings, []);
+    assert.equal(fs.existsSync(path.join(assetsDir, "linux-settings-toggle-linux.js")), false);
+
+    const linuxDesktopSource = fs.readFileSync(
+      path.join(assetsDir, linuxDesktopSettingsAsset),
+      "utf8",
+    );
+    assert.match(linuxDesktopSource, /import\{vn as Toggle\}from"\.\/shared-toggle-A\.js"/);
+    assert.match(
+      linuxDesktopSource,
+      /control:\$\.jsx\(Toggle,\{checked:value,disabled:isLoading,onChange:update,ariaLabel:label\}\)/,
+    );
+    assert.doesNotMatch(linuxDesktopSource, /function LinuxSwitch/);
+    assert.doesNotMatch(linuxDesktopSource, /bg-token-text-primary/);
+    assert.doesNotMatch(linuxDesktopSource, /translate-x-4/);
   } finally {
     fs.rmSync(extractedDir, { recursive: true, force: true });
   }
@@ -4151,6 +4333,8 @@ test("adds Linux desktop settings when native shortcuts use a consolidated setti
     assert.match(linuxDesktopSource, /href:url/);
     assert.doesNotMatch(linuxDesktopSource, /Source commit URL/);
     assert.match(linuxDesktopSource, /import\{R as __reactFactory,I as __jsxFactory\}from"\.\/shared-runtime-A\.js"/);
+    assert.match(linuxDesktopSource, /import\{t as Toggle\}from"\.\/toggle-A\.js"/);
+    assert.doesNotMatch(linuxDesktopSource, /function LinuxSwitch/);
 
     const settingsPageSource = fs.readFileSync(path.join(assetsDir, "settings-page-A.js"), "utf8");
     assert.match(settingsPageSource, /linux-desktop-settings-linux\.js/);
@@ -4192,6 +4376,13 @@ test("adds Linux desktop settings when the lazy route map is hoisted into a sepa
     assert.ok(result.changed >= 3);
     assert.deepEqual(warnings, []);
     assert.equal(fs.existsSync(path.join(assetsDir, linuxDesktopSettingsAsset)), true);
+
+    const linuxDesktopSource = fs.readFileSync(
+      path.join(assetsDir, linuxDesktopSettingsAsset),
+      "utf8",
+    );
+    assert.match(linuxDesktopSource, /import\{t as Toggle\}from"\.\/toggle-A\.js"/);
+    assert.doesNotMatch(linuxDesktopSource, /function LinuxSwitch/);
 
     // The icon/navigation bundle must reuse the general-settings icon for the new
     // entry and must NOT receive the lazy page component as a nav icon (the bug
@@ -4980,6 +5171,43 @@ test("adds installWhenMissing to an already Linux-enabled Computer Use gate", ()
 
   assert.match(patched, /installWhenMissing:!0,name:tn/);
   assert.equal((patched.match(/installWhenMissing:!0,name:tn/g) || []).length, 1);
+});
+
+test("patches marketplace selector Computer Use gate to keep Linux legacy MCP", () => {
+  const source = [
+    "function dl(e){if(!(e.platform!==`darwin`||!e.marketplacePluginNames.includes(`computer-use`)))return e.desktopFeatureAvailability.computerUseNodeRepl?`node-repl`:`legacy-mcp`}",
+  ].join("");
+
+  const patched = applyPatchTwice(applyLinuxComputerUsePluginGatePatch, source);
+
+  assert.match(
+    patched,
+    /if\(!\(\(\s*e.platform!==`darwin`&&e.platform!==`linux`\)\|\|!e.marketplacePluginNames.includes\(`computer-use`\)\)\)return e.platform===`darwin`&&e.desktopFeatureAvailability.computerUseNodeRepl\?`node-repl`:`legacy-mcp`/,
+  );
+  assert.doesNotMatch(
+    patched,
+    /if\(!\(e.platform!==`darwin`\|\|!e.marketplacePluginNames.includes\(`computer-use`\)\)\)return e.desktopFeatureAvailability.computerUseNodeRepl\?`node-repl`:`legacy-mcp`/,
+  );
+});
+
+test("patches marketplace selector and plugin gate in one pass", () => {
+  const source = [
+    "var tn=`computer-use`;",
+    "function dl(e){if(!(e.platform!==`darwin`||!e.marketplacePluginNames.includes(`computer-use`)))return e.desktopFeatureAvailability.computerUseNodeRepl?`node-repl`:`legacy-mcp`}",
+    "var $n=[{name:tn,isEnabled:({features:n,platform:r})=>r===`darwin`&&n.computerUse,migrate:wn}];",
+  ].join("");
+
+  const patched = applyPatchTwice(applyLinuxComputerUsePluginGatePatch, source);
+
+  assert.match(
+    patched,
+    /if\(!\(\(\s*e.platform!==`darwin`&&e.platform!==`linux`\)\|\|!e.marketplacePluginNames.includes\(`computer-use`\)\)\)return e.platform===`darwin`&&e.desktopFeatureAvailability.computerUseNodeRepl\?`node-repl`:`legacy-mcp`/,
+  );
+  assert.match(
+    patched,
+    /installWhenMissing:!0,name:tn,isEnabled:\(\{features:n,platform:r\}\)=>\(r===`darwin`\|\|r===`linux`\)&&n\.computerUse,migrate:wn/,
+  );
+  assert.doesNotMatch(patched, /r===`darwin`&&n\.computerUse/);
 });
 
 test("keeps scanning Computer Use gates after an already patched match", () => {
@@ -5900,6 +6128,143 @@ test("allows current required-feature Computer Use gate on Linux", () => {
   );
 });
 
+function externalOpenChildClosingWith(code) {
+  const child = new EventEmitter();
+  child.unref = () => {};
+  setImmediate(() => child.emit("close", code));
+  return child;
+}
+
+function externalOpenChildFailingWith(error) {
+  const child = new EventEmitter();
+  child.unref = () => {};
+  setImmediate(() => child.emit("error", error));
+  return child;
+}
+
+function evaluatePatchedExternalOpen({
+  env = {},
+  platform = "linux",
+  spawn = () => {
+    throw new Error("unexpected xdg-open spawn");
+  },
+  originalOpenExternal = async () => undefined,
+} = {}) {
+  const originalCalls = [];
+  const electron = {
+    shell: {
+      openExternal(url, options) {
+        originalCalls.push({ url, options });
+        return originalOpenExternal(url, options);
+      },
+    },
+  };
+  const source =
+    "\"use strict\";let e=require(`electron`);async function openExternal(url,options){return e.shell.openExternal(url,options)}";
+  const patched = applyPatchTwice(applyLinuxExternalOpenEnvPatch, source);
+  const openExternal = vm.runInNewContext(`${patched};openExternal`, {
+    require(moduleName) {
+      if (moduleName === "electron") return electron;
+      if (moduleName === "node:child_process") return { spawn };
+      throw new Error(`unexpected module: ${moduleName}`);
+    },
+    process: { platform, env },
+    setTimeout,
+    clearTimeout,
+  });
+  return { openExternal, originalCalls };
+}
+
+test("sanitizes Linux external-open environment before xdg-open", async () => {
+  const spawnCalls = [];
+  const env = {
+    PATH: "/usr/bin",
+    DISPLAY: ":1",
+    LD_LIBRARY_PATH: "/tmp/bad",
+    LD_PRELOAD: "/tmp/preload.so",
+    NODE_OPTIONS: "--require /tmp/hook.js",
+    CODEX_LINUX_WEBVIEW_PORT: "1234",
+  };
+  const { openExternal, originalCalls } = evaluatePatchedExternalOpen({
+    env,
+    spawn(command, args, options) {
+      spawnCalls.push({ command, args, options });
+      return externalOpenChildClosingWith(0);
+    },
+  });
+
+  await openExternal("https://example.test/docs");
+
+  assert.deepEqual(originalCalls, []);
+  assert.equal(spawnCalls.length, 1);
+  assert.equal(spawnCalls[0].command, "xdg-open");
+  assert.deepEqual(Array.from(spawnCalls[0].args), ["https://example.test/docs"]);
+  assert.equal(spawnCalls[0].options.detached, true);
+  assert.equal(spawnCalls[0].options.stdio, "ignore");
+  assert.equal(spawnCalls[0].options.env.PATH, "/usr/bin");
+  assert.equal(spawnCalls[0].options.env.DISPLAY, ":1");
+  for (const key of [
+    "LD_LIBRARY_PATH",
+    "LD_PRELOAD",
+    "NODE_OPTIONS",
+    "CODEX_LINUX_WEBVIEW_PORT",
+  ]) {
+    assert.equal(Object.hasOwn(spawnCalls[0].options.env, key), false);
+  }
+});
+
+test("delegates non-string Linux external-open targets to Electron", async () => {
+  const target = { href: "https://example.test/docs" };
+  const options = { activate: false };
+  const { openExternal, originalCalls } = evaluatePatchedExternalOpen({
+    originalOpenExternal: async () => "delegated",
+  });
+
+  assert.equal(await openExternal(target, options), "delegated");
+  assert.deepEqual(originalCalls, [{ url: target, options }]);
+});
+
+test("delegates Linux external-open calls with options to Electron", async () => {
+  const options = { activate: false };
+  const { openExternal, originalCalls } = evaluatePatchedExternalOpen({
+    originalOpenExternal: async () => "delegated",
+  });
+
+  assert.equal(await openExternal("https://example.test/docs", options), "delegated");
+  assert.deepEqual(originalCalls, [{ url: "https://example.test/docs", options }]);
+});
+
+test("falls back to Electron when sanitized xdg-open spawning fails", async () => {
+  const { openExternal, originalCalls } = evaluatePatchedExternalOpen({
+    spawn: () => externalOpenChildFailingWith(new Error("xdg-open missing")),
+    originalOpenExternal: async () => "fallback",
+  });
+
+  assert.equal(await openExternal("https://example.test/docs"), "fallback");
+  assert.deepEqual(originalCalls, [{ url: "https://example.test/docs", options: undefined }]);
+});
+
+test("keeps already-applied Linux external-open patch quiet", () => {
+  const source =
+    "\"use strict\";let e=require(`electron`);async function openExternal(url,options){return e.shell.openExternal(url,options)}";
+  const patched = applyLinuxExternalOpenEnvPatch(source);
+  const { value, warnings } = captureWarns(() => applyLinuxExternalOpenEnvPatch(patched));
+
+  assert.equal(value, patched);
+  assert.deepEqual(warnings, []);
+});
+
+test("warns when Linux external-open helper exists without wrapped Electron require", () => {
+  const source =
+    "\"use strict\";function codexLinuxPatchExternalOpen(e){return e}let {shell:e}=require(`electron`);";
+  const { value, warnings } = captureWarns(() => applyLinuxExternalOpenEnvPatch(source));
+
+  assert.equal(value, source);
+  assert.deepEqual(warnings, [
+    "WARN: Could not find Electron require initializer — skipping Linux external open environment patch",
+  ]);
+});
+
 test("auto-approves the app-provided Browser Use node_repl bridge", () => {
   const source =
     "return{[`mcp_servers.${pt}`]:{command:i.nodeReplPath,args:[],startup_timeout_sec:120,env:{[dt]:l,[ft]:i.nodePath}}}";
@@ -6478,7 +6843,7 @@ test("patchMainBundleSource keeps non-icon patches active without an icon asset"
   assert.match(patched, /codexLinuxIsQuitInProgress=\(\)=>codexLinuxQuitInProgress===!0/);
   assert.match(patched, /codexLinuxShouldBypassQuitPrompt=\(\)=>codexLinuxExplicitQuitApproved===!0/);
   assert.match(patched, /n\.app\.on\(`before-quit`,codexLinuxBeforeQuitHandler\)/);
-  assert.match(patched, /process\.platform===`linux`&&k\.setMenuBarVisibility\(!1\)/);
+  assert.match(patched, /process\.platform===`linux`&&k\.removeMenu\(\)/);
   assert.match(patched, /linux:\{label:`File Manager`/);
   assert.match(
     patched,
@@ -7560,6 +7925,46 @@ test("criticalFailuresFromReport agrees with validateReport and skips non-applic
   assert.ok(failures.some((failure) => failure.startsWith("req-bad:")));
   assert.ok(!failures.some((failure) => failure.startsWith("req-not-applicable:")));
   assert.ok(!failures.some((failure) => failure.startsWith("opt-bad:")));
+});
+
+test("terminal user PATH patch drift is reported as optional", () => {
+  const coreRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-terminal-path-optional-core-"));
+  const tempApp = fs.mkdtempSync(path.join(os.tmpdir(), "codex-terminal-path-optional-app-"));
+  try {
+    writeCorePatchFixture(coreRoot, "sample/terminal-path", [
+      "\"use strict\";",
+      "const { applyLinuxTerminalUserPathPatch } = require(",
+      `  ${JSON.stringify(path.join(__dirname, "patches", "main-process", "misc.js"))},`,
+      ");",
+      "module.exports = {",
+      "  id: \"linux-terminal-user-path\",",
+      "  phase: \"main-bundle\",",
+      "  ciPolicy: \"optional\",",
+      "  apply: applyLinuxTerminalUserPathPatch,",
+      "};",
+    ].join("\n"));
+
+    const buildDir = path.join(tempApp, ".vite", "build");
+    fs.mkdirSync(buildDir, { recursive: true });
+    fs.writeFileSync(path.join(buildDir, "main.js"), "async buildTerminalEnv(){return null}// node-pty");
+
+    const report = createPatchReport();
+    captureWarns(() => patchExtractedApp(tempApp, { report, corePatchRoot: coreRoot }));
+
+    const entry = report.patches.find((patch) => patch.name === "linux-terminal-user-path");
+    assert.equal(entry?.ciPolicy, "optional");
+    assert.equal(entry?.status, "skipped-optional");
+    assert.ok(
+      optionalDriftFromReport(report).some((drift) => drift.name === "linux-terminal-user-path"),
+      "terminal PATH drift should stay visible as optional drift",
+    );
+    assert.ok(
+      !criticalFailuresFromReport(report).some((failure) => failure.name === "linux-terminal-user-path"),
+    );
+  } finally {
+    fs.rmSync(coreRoot, { recursive: true, force: true });
+    fs.rmSync(tempApp, { recursive: true, force: true });
+  }
 });
 
 test("patchMainBundleSource survives a throwing optional patch without a report", () => {

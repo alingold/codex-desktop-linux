@@ -543,6 +543,10 @@ export_packaged_runtime_env() {
 prepend_managed_node_runtime_to_path() {
     [ -x "$MANAGED_NODE_BIN_DIR/node" ] || return 0
 
+    if [ -z "${CODEX_LINUX_USER_PATH+x}" ]; then
+        export CODEX_LINUX_USER_PATH="${PATH:-}"
+    fi
+
     case ":$PATH:" in
         *":$MANAGED_NODE_BIN_DIR:"*) ;;
         *) export PATH="$MANAGED_NODE_BIN_DIR:$PATH" ;;

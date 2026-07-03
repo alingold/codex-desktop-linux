@@ -11,6 +11,7 @@ const {
   applyLinuxOpaqueBackgroundPatch,
   applyLinuxFileManagerPatch,
   patchLinuxWorkerFileManagerTarget,
+  applyLinuxTerminalUserPathPatch,
   applyLinuxBuildInfoTrayPatch,
   applyLinuxTrayPatch,
   applyLinuxSingleInstancePatch,
@@ -104,6 +105,13 @@ module.exports = [
       }
       return "already-applied";
     },
+  },
+  {
+    id: "linux-terminal-user-path",
+    phase: "main-bundle",
+    order: 105,
+    ciPolicy: "optional",
+    apply: applyLinuxTerminalUserPathPatch,
   },
   {
     id: "linux-tray",

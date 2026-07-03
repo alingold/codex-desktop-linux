@@ -343,28 +343,29 @@ function applyLinuxNativeTitlebarPatch(currentSource) {
 
 function applyLinuxMenuPatch(currentSource) {
   const menuRegex = /process\.platform===`win32`&&([A-Za-z_$][\w$]*)\.removeMenu\(\),/g;
-  let patchedAny = false;
-  const patchedSource = currentSource.replace(menuRegex, (match, windowVar, offset) => {
-    const linuxPatch = `process.platform===\`linux\`&&${windowVar}.setMenuBarVisibility(!1),`;
-    // The frameless-titlebar feature upgrades the inserted snippet to also
-    // call removeMenu?.(); treat that form as already applied so re-running
-    // the pipeline over feature-patched output stays idempotent.
-    const upgradedLinuxPatch = `process.platform===\`linux\`&&(${windowVar}.setMenuBarVisibility(!1),${windowVar}.removeMenu?.()),`;
-    if (
-      currentSource.slice(Math.max(0, offset - linuxPatch.length), offset) === linuxPatch ||
-      currentSource.slice(Math.max(0, offset - upgradedLinuxPatch.length), offset) === upgradedLinuxPatch
-    ) {
+  let patchedSource = currentSource
+    .replace(
+      /process\.platform===`linux`&&\(([A-Za-z_$][\w$]*)\.setMenuBarVisibility\(!1\),\1\.removeMenu\?\.\(\)\),process\.platform===`win32`&&\1\.removeMenu\(\),/g,
+      (_match, windowVar) => `process.platform===\`linux\`&&${windowVar}.removeMenu(),process.platform===\`win32\`&&${windowVar}.removeMenu(),`,
+    )
+    .replace(
+      /process\.platform===`linux`&&([A-Za-z_$][\w$]*)\.setMenuBarVisibility\(!1\),process\.platform===`win32`&&\1\.removeMenu\(\),/g,
+      (_match, windowVar) => `process.platform===\`linux\`&&${windowVar}.removeMenu(),process.platform===\`win32\`&&${windowVar}.removeMenu(),`,
+    );
+  let patchedAny = patchedSource !== currentSource;
+  patchedSource = patchedSource.replace(menuRegex, (match, windowVar, offset, source) => {
+    const linuxPatch = `process.platform===\`linux\`&&${windowVar}.removeMenu(),`;
+    if (source.slice(Math.max(0, offset - linuxPatch.length), offset) === linuxPatch) {
       return match;
     }
     patchedAny = true;
     return `${linuxPatch}${match}`;
   });
 
-  if (!patchedAny && !currentSource.includes("setMenuBarVisibility(!1)")) {
-    const hasWindowsRemoveMenu = /process\.platform===`win32`&&[A-Za-z_$][\w$]*\.removeMenu\(\),/.test(currentSource);
-    if (hasWindowsRemoveMenu) {
-      console.warn("WARN: Could not find window menu visibility snippet — skipping menu patch");
-    }
+  const hasWindowsRemoveMenu = /process\.platform===`win32`&&[A-Za-z_$][\w$]*\.removeMenu\(\),/.test(patchedSource);
+  const hasLinuxRemoveMenu = /process\.platform===`linux`&&([A-Za-z_$][\w$]*)\.removeMenu\(\),process\.platform===`win32`&&\1\.removeMenu\(\),/.test(patchedSource);
+  if (!patchedAny && hasWindowsRemoveMenu && !hasLinuxRemoveMenu) {
+    console.warn("WARN: Could not find window menu visibility snippet — skipping menu patch");
   }
 
   return patchedSource;

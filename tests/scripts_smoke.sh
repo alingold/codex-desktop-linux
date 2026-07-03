@@ -472,6 +472,7 @@ test_update_builder_preserves_enabled_linux_features_config() {
     local staged_config="$root/opt/codex-desktop/update-builder/linux-features/features.json"
     local staged_local_manifest="$root/opt/codex-desktop/update-builder/linux-features/local/local-tool/feature.json"
     local source_info="$root/opt/codex-desktop/update-builder/.codex-linux/source-info.json"
+    local update_builder_manifest="$root/opt/codex-desktop/update-builder/.codex-linux/update-builder-manifest.txt"
 
     mkdir -p "$workspace"
     make_fake_app "$app_dir"
@@ -523,12 +524,16 @@ JSON
 
     assert_file_exists "$staged_config"
     assert_file_exists "$staged_local_manifest"
+    assert_file_exists "$update_builder_manifest"
     assert_contains "$staged_config" "example-feature"
     assert_contains "$staged_config" "local-tool"
     assert_contains "$staged_config" "tweaks"
     assert_contains "$staged_config" "mode"
     assert_not_contains "$staged_config" "localComment"
     assert_not_contains "$staged_config" "disabled-feature"
+    assert_contains "$update_builder_manifest" "record-replay-linux/Cargo.toml"
+    assert_contains "$update_builder_manifest" "assets/codex-linux.png"
+    assert_not_contains "$update_builder_manifest" "^node-runtime/"
 
     node - "$staged_config" <<'NODE' || fail "Expected staged Linux features config to be sanitized"
 const fs = require("node:fs");
@@ -1437,6 +1442,50 @@ EOF
     [ "$(cat "$differing/Codex.dmg")" = "new" ] || fail "Expected differing metadata to refresh cache"
     assert_contains "$differing/curl.log" "GET"
 
+    local differing_pinned="$workspace/differing-pinned"
+    mkdir -p "$differing_pinned"
+    printf '%s' "old" >"$differing_pinned/Codex.dmg"
+    cat >"$differing_pinned/Codex.dmg.metadata" <<EOF
+url_sha256=$url_sha256
+etag=old-etag
+last_modified=Thu, 04 Jun 2026 00:00:00 GMT
+content_length=3
+EOF
+    run_dmg_cache_case "$differing_pinned" "$differing_pinned/output.log" \
+        CODEX_DMG_REFRESH_MODE=pinned \
+        TEST_ETAG=fresh-etag \
+        TEST_LAST_MODIFIED="Thu, 04 Jun 2026 00:00:00 GMT" \
+        TEST_CONTENT_LENGTH=3 \
+        TEST_DOWNLOAD_CONTENT=new
+    [ "$(cat "$differing_pinned/Codex.dmg")" = "old" ] || fail "Expected pinned stale cache to keep old DMG"
+    assert_not_contains "$differing_pinned/curl.log" "HEAD"
+    assert_not_contains "$differing_pinned/curl.log" "GET"
+    assert_contains "$differing_pinned/output.log" "CODEX_DMG_REFRESH_MODE=pinned"
+
+    local no_metadata_pinned="$workspace/no-metadata-pinned"
+    mkdir -p "$no_metadata_pinned"
+    printf '%s' "old" >"$no_metadata_pinned/Codex.dmg"
+    run_dmg_cache_case "$no_metadata_pinned" "$no_metadata_pinned/output.log" \
+        CODEX_DMG_REFRESH_MODE=pinned \
+        TEST_ETAG=fresh-etag \
+        TEST_LAST_MODIFIED="Thu, 04 Jun 2026 00:00:00 GMT" \
+        TEST_CONTENT_LENGTH=3 \
+        TEST_DOWNLOAD_CONTENT=new
+    [ "$(cat "$no_metadata_pinned/Codex.dmg")" = "old" ] || fail "Expected pinned missing metadata cache to keep old DMG"
+    assert_not_contains "$no_metadata_pinned/curl.log" "HEAD"
+    assert_not_contains "$no_metadata_pinned/curl.log" "GET"
+
+    local missing_pinned="$workspace/missing-pinned"
+    mkdir -p "$missing_pinned"
+    if run_dmg_cache_case "$missing_pinned" "$missing_pinned/output.log" \
+        CODEX_DMG_REFRESH_MODE=pinned
+    then
+        fail "Expected pinned mode without cached DMG to fail"
+    fi
+    assert_not_contains "$missing_pinned/curl.log" "HEAD"
+    assert_not_contains "$missing_pinned/curl.log" "GET"
+    assert_contains "$missing_pinned/output.log" "requires an existing cached DMG"
+
     local failed_get="$workspace/failed-get"
     mkdir -p "$failed_get"
     printf '%s' "old" >"$failed_get/Codex.dmg"
@@ -1676,6 +1725,34 @@ SCRIPT
 
     assert_file_not_exists "$source_dir/Codex.dmg"
     assert_file_not_exists "$source_dir/Codex.dmg.metadata"
+}
+
+test_fresh_pinned_dmg_preserves_cached_dmg_metadata() {
+    info "Checking --fresh preserves cached DMG metadata in pinned refresh mode"
+    local workspace="$TMP_DIR/fresh-pinned-dmg-metadata"
+    local source_dir="$workspace/source"
+
+    mkdir -p "$source_dir"
+    printf '%s' "cached" >"$source_dir/Codex.dmg"
+    printf '%s' "metadata" >"$source_dir/Codex.dmg.metadata"
+
+    TEST_SOURCE_DIR="$source_dir" REPO_DIR="$REPO_DIR" bash <<'SCRIPT'
+set -Eeuo pipefail
+
+SCRIPT_DIR="$TEST_SOURCE_DIR"
+WORK_DIR="$(mktemp -d)"
+INSTALL_DIR="$TEST_SOURCE_DIR/codex-app"
+CODEX_DMG_REFRESH_MODE=pinned
+# shellcheck disable=SC1091
+source "$REPO_DIR/scripts/lib/install-helpers.sh"
+
+FRESH_INSTALL=1
+REUSE_CACHED_DMG=0
+prepare_install
+SCRIPT
+
+    assert_file_exists "$source_dir/Codex.dmg"
+    assert_file_exists "$source_dir/Codex.dmg.metadata"
 }
 
 test_fresh_reuse_dmg_uses_cache_when_metadata_matches() {
@@ -2572,6 +2649,184 @@ test_upstream_build_app_workflow_tracks_dmg_metadata() {
     assert_contains "$workflow" 'DMG SHA-256'
 }
 
+make_update_nix_hash_fixture() {
+    local fixture="$1"
+    local hash_a="sha256-VVQNu/E7Wuyxfsy93Gorknr0t7H7wy9kxMOiBZYOo/o="
+
+    mkdir -p "$fixture/scripts/ci" "$fixture/nix/native-modules" "$fixture/bin"
+    cp "$REPO_DIR/scripts/ci/update-nix-hashes.sh" "$fixture/scripts/ci/update-nix-hashes.sh"
+    chmod +x "$fixture/scripts/ci/update-nix-hashes.sh"
+
+    cat > "$fixture/flake.nix" <<EOF
+{
+  codexVersion = "26.623.81905";
+  electronVersion = "42.1.0";
+
+  codexDmg = pkgs.fetchurl {
+    url = "https://persistent.oaistatic.com/codex-app-prod/Codex.dmg";
+    hash = "$hash_a";
+  };
+
+  x86_64-linux = {
+    hash = "$hash_a";
+  };
+
+  aarch64-linux = {
+    hash = "$hash_a";
+  };
+
+  electronHeaders = pkgs.fetchurl {
+    hash = "$hash_a";
+  };
+}
+EOF
+    printf '%s\n' '{"dependencies":{"electron":"42.1.0","better-sqlite3":"12.9.0","node-pty":"1.1.0"}}' \
+        > "$fixture/nix/native-modules/package.json"
+    printf '%s\n' '{"name":"native-modules","lockfileVersion":3,"packages":{}}' \
+        > "$fixture/nix/native-modules/package-lock.json"
+
+    cat > "$fixture/scripts/ci/validate-nix-pins.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+echo "validate stub invoked"
+if [ "${VALIDATE_PIN_CHANGE:-0}" = "1" ]; then
+    python3 - "$REPO_DIR/flake.nix" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+text = re.sub(r'(codexVersion\s*=\s*")[^"]+(";)', r'\g<1>99.0.0\2', text, count=1)
+path.write_text(text)
+PY
+fi
+EOF
+    chmod +x "$fixture/scripts/ci/validate-nix-pins.sh"
+
+    cat > "$fixture/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+out=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -o)
+            shift
+            out="${1:-}"
+            ;;
+    esac
+    shift || true
+done
+if [ -n "$out" ]; then
+    printf 'fake dmg\n' > "$out"
+    exit 0
+fi
+version="26.623.81905"
+if [ "${VALIDATE_PIN_CHANGE:-0}" = "1" ]; then
+    version="99.0.0"
+fi
+printf '<rss><channel><item><sparkle:shortVersionString>%s</sparkle:shortVersionString></item></channel></rss>\n' "$version"
+EOF
+    chmod +x "$fixture/bin/curl"
+
+    cat > "$fixture/bin/nix" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}" in
+    hash)
+        printf '%s\n' "${NIX_HASH:-sha256-VVQNu/E7Wuyxfsy93Gorknr0t7H7wy9kxMOiBZYOo/o=}"
+        ;;
+    store)
+        printf '{"hash":"%s"}\n' "${NIX_HASH:-sha256-VVQNu/E7Wuyxfsy93Gorknr0t7H7wy9kxMOiBZYOo/o=}"
+        ;;
+    build)
+        printf 'nix %s\n' "$*" >> "$CALL_LOG"
+        printf 'fake nix build ok\n'
+        ;;
+    *)
+        echo "unexpected nix call: $*" >&2
+        exit 2
+        ;;
+esac
+EOF
+    chmod +x "$fixture/bin/nix"
+
+    cat > "$fixture/bin/nix-store" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'nix-store %s\n' "$*" >> "$CALL_LOG"
+EOF
+    chmod +x "$fixture/bin/nix-store"
+
+    cat > "$fixture/bin/npm" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'npm %s\n' "$*" >> "$CALL_LOG"
+EOF
+    chmod +x "$fixture/bin/npm"
+
+    git -C "$fixture" init -q
+    git -C "$fixture" config user.name "Test"
+    git -C "$fixture" config user.email "test@example.invalid"
+    git -C "$fixture" add flake.nix nix/native-modules/package.json nix/native-modules/package-lock.json
+    git -C "$fixture" commit -q -m "fixture"
+}
+
+run_update_nix_hash_fixture() {
+    local label="$1"
+    local validate_pin_change="$2"
+    local nix_hash="$3"
+    local fixture="$TMP_DIR/$label"
+
+    make_update_nix_hash_fixture "$fixture"
+    : > "$fixture/calls.log"
+    PATH="$fixture/bin:$PATH" \
+        REPO_DIR="$fixture" \
+        FLAKE_FILE="$fixture/flake.nix" \
+        UPSTREAM_DMG_PATH="$fixture/Codex.dmg" \
+        VERIFY_LOG="$fixture/verify.log" \
+        CALL_LOG="$fixture/calls.log" \
+        VALIDATE_PIN_CHANGE="$validate_pin_change" \
+        NIX_HASH="$nix_hash" \
+        bash "$fixture/scripts/ci/update-nix-hashes.sh" > "$fixture/output.log" 2>&1
+}
+
+test_update_nix_hashes_skips_unchanged_package_verification() {
+    info "Checking Nix hash refresh skips package verification when pins are unchanged"
+    local fixture="$TMP_DIR/nix-hash-refresh-unchanged"
+    local hash_a="sha256-VVQNu/E7Wuyxfsy93Gorknr0t7H7wy9kxMOiBZYOo/o="
+
+    run_update_nix_hash_fixture "$(basename "$fixture")" 0 "$hash_a"
+
+    assert_contains "$fixture/output.log" "Nix pins unchanged; skipping package-output verification."
+    assert_not_contains "$fixture/calls.log" "nix-store"
+    assert_not_contains "$fixture/calls.log" "nix build"
+}
+
+test_update_nix_hashes_verifies_changed_pins() {
+    info "Checking Nix hash refresh still verifies changed pins"
+    local fixture="$TMP_DIR/nix-hash-refresh-version-change"
+    local hash_a="sha256-VVQNu/E7Wuyxfsy93Gorknr0t7H7wy9kxMOiBZYOo/o="
+
+    run_update_nix_hash_fixture "$(basename "$fixture")" 1 "$hash_a"
+
+    assert_contains "$fixture/output.log" "Nix builds succeeded after refreshing the upstream pins and Codex.dmg hash."
+    assert_contains "$fixture/calls.log" "nix-store --add-fixed"
+    assert_contains "$fixture/calls.log" "nix build"
+}
+
+test_update_nix_hashes_verifies_changed_dmg_hash() {
+    info "Checking Nix hash refresh still verifies changed DMG hashes"
+    local fixture="$TMP_DIR/nix-hash-refresh-dmg-hash-change"
+    local hash_b="sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
+    run_update_nix_hash_fixture "$(basename "$fixture")" 0 "$hash_b"
+
+    assert_contains "$fixture/output.log" "Nix builds succeeded after refreshing the upstream pins and Codex.dmg hash."
+    assert_contains "$fixture/calls.log" "nix-store --add-fixed"
+    assert_contains "$fixture/calls.log" "nix build"
+}
+
 test_installer_detects_electron_version_from_plist() {
     info "Checking Electron version detection from app metadata"
     local workspace="$TMP_DIR/electron-version"
@@ -2932,6 +3187,7 @@ SCRIPT
 
     assert_file_exists "$workspace/work/.v8-nullptr-fix.h"
     assert_file_exists "$workspace/work/.cxx-v8-nullptr"
+    assert_contains "$workspace/work/.cxx-v8-nullptr" "#!/usr/bin/env bash"
     assert_contains "$workspace/work/.v8-nullptr-fix.h" "using std::nullptr_t;"
     assert_contains "$cxx_state" "CXX=$workspace/work/.cxx-v8-nullptr"
     assert_contains "$cxx_log" "-include"
@@ -3346,6 +3602,10 @@ if "if needs_cold_start;" not in runtime_body:
     raise SystemExit("second-instance handoff must skip CLI preflight")
 if 'run_cold_start_hooks' not in runtime_body:
     raise SystemExit("cold start must run feature-staged hooks before Electron launches")
+if 'export CODEX_LINUX_USER_PATH="${PATH:-}"' not in source:
+    raise SystemExit("launcher must capture the user PATH before prepending the managed Node runtime")
+if source.index('export CODEX_LINUX_USER_PATH="${PATH:-}"') > source.index('export PATH="$MANAGED_NODE_BIN_DIR:$PATH"'):
+    raise SystemExit("launcher must capture CODEX_LINUX_USER_PATH before mutating PATH for Electron")
 for name, body in (("prelaunch", prelaunch_hooks_body), ("cold-start", cold_start_hooks_body), ("launcher", launcher_hooks_body)):
     if 'CODEX_HOME="$CODEX_HOME"' not in body:
         raise SystemExit(f"launcher {name} hooks must receive resolved CODEX_HOME")
@@ -3742,6 +4002,7 @@ EOF
     assert_contains "$REPO_DIR/flake.nix" "https://static.crates.io/crates/"
     assert_contains "$REPO_DIR/flake.nix" "api/v1/crates/"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "MANAGED_NODE_BIN_DIR"
+    assert_contains "$REPO_DIR/launcher/start.sh.template" "CODEX_LINUX_USER_PATH"
     assert_contains "$REPO_DIR/updater/src/builder.rs" "managed_node_bin_dirs"
     assert_contains "$REPO_DIR/scripts/build-rpm.sh" "stage_common_package_files"
     assert_contains "$REPO_DIR/scripts/build-rpm.sh" "PACKAGED_RUNTIME_SOURCE"
@@ -4529,7 +4790,8 @@ test_linux_file_manager_patch_smoke() {
     node "$REPO_DIR/scripts/patch-linux-window-ui.js" "$extracted" >"$output_log" 2>&1
     assert_contains "$extracted/.vite/build/main-test.js" 'detect:()=>`linux-file-manager`'
     assert_contains "$extracted/.vite/build/main-test.js" 'linux:{label:`File Manager`'
-    assert_contains "$extracted/.vite/build/main-test.js" 'process.platform===`linux`&&D.setMenuBarVisibility(!1),'
+    assert_contains "$extracted/.vite/build/main-test.js" 'process.platform===`linux`&&D.removeMenu(),process.platform===`win32`&&D.removeMenu(),'
+    assert_not_contains "$extracted/.vite/build/main-test.js" 'D.setMenuBarVisibility(!1)'
     assert_contains "$extracted/.vite/build/main-test.js" '&&D.setIcon('
     assert_contains "$extracted/webview/assets/app-server-manager-signals-test.js" '`subAgent`in e?e.subAgent:`subagent`in e?e.subagent:null'
     assert_contains "$extracted/webview/assets/app-server-manager-signals-test.js" 'Zl(e.agentNickname)??Zl(e.agent_nickname)??Zl(B(e.source)?.agentNickname)'
@@ -4719,7 +4981,7 @@ if (!result.event.prevented || result.state.hideCalls !== 1) {
 NODE
 
     node "$REPO_DIR/scripts/patch-linux-window-ui.js" "$extracted" >"$output_log" 2>&1
-    assert_occurrence_count "$extracted/.vite/build/main-test.js" 'process.platform!==`linux`' '1'
+    assert_occurrence_count "$extracted/.vite/build/main-test.js" 'process.platform!==`win32`&&process.platform!==`darwin`&&process.platform!==`linux`?null:' '1'
     assert_occurrence_count "$extracted/.vite/build/main-test.js" 'nativeImage.createFromPath(process.resourcesPath' '3'
     assert_occurrence_count "$extracted/.vite/build/main-test.js" 'nativeImage.createFromPath(process.resourcesPath+`/../.codex-linux/codex-desktop-tray.png`)' '1'
     assert_occurrence_count "$extracted/.vite/build/main-test.js" 'nativeImage.createFromPath(process.resourcesPath+`/../.codex-linux/codex-desktop.png`)' '1'
@@ -4902,6 +5164,10 @@ JS
     assert_contains "$extracted/webview/assets/linux-desktop-settings-linux.js" "codex-linux-system-tray-enabled"
     assert_contains "$extracted/webview/assets/linux-desktop-settings-linux.js" "codex-linux-warm-start-enabled"
     assert_contains "$extracted/webview/assets/linux-desktop-settings-linux.js" "codex-linux-prompt-window-enabled"
+    assert_contains "$extracted/webview/assets/linux-desktop-settings-linux.js" ' as Toggle}from"./'
+    assert_not_contains "$extracted/webview/assets/linux-desktop-settings-linux.js" "function LinuxSwitch"
+    assert_not_contains "$extracted/webview/assets/linux-desktop-settings-linux.js" "bg-token-text-primary"
+    assert_not_contains "$extracted/webview/assets/linux-desktop-settings-linux.js" "translate-x-4"
     assert_contains "$extracted/webview/assets/settings-sections-test.js" 'slug:`linux-desktop`'
     assert_contains "$extracted/webview/assets/settings-shared-test.js" "settings.nav.linux-desktop"
     assert_contains "$extracted/webview/assets/settings-shared-test.js" "settings.section.linux-desktop"
@@ -5486,17 +5752,19 @@ test_linux_computer_use_gate_patch_smoke() {
     bundle_body="$(cat <<'JS'
 let n={app:{whenReady(){},quit(){},requestSingleInstanceLock(){},on(){},off(){}}};
 let Qt=`openai-bundled`,$t=`browser-use`,en=`chrome-internal`,tn=`computer-use`,nn=`latex-tectonic`;
-var $n=[{forceReload:!0,installWhenMissing:!0,name:$t,isEnabled:({features:e})=>e.browserAgentAvailable,migrate:cn},{name:en,isEnabled:({buildFlavor:e})=>rn(e)},{name:tn,isEnabled:({features:e,platform:t})=>t===`darwin`&&e.computerUse,migrate:wn},{name:nn,isEnabled:()=>!0}];
+function cl(e){if(!(e.platform!==`darwin`||!e.marketplacePluginNames.includes(`computer-use`)))return e.desktopFeatureAvailability.computerUseNodeRepl?`node-repl`:`legacy-mcp`}
+var $n=[{forceReload:!0,installWhenMissing:!0,name:$t,isEnabled:({features:e})=>e.browserAgentAvailable,migrate:cn},{name:en,isEnabled:({buildFlavor:e})=>rn(e)},{name:tn,isEnabled:cl,migrate:wn},{name:nn,isEnabled:()=>!0}];
 JS
 )"
     make_fake_extracted_asar "$extracted" "$bundle_body"
 
     node "$REPO_DIR/scripts/patch-linux-window-ui.js" "$extracted" >"$output_log" 2>&1
-    assert_contains "$extracted/.vite/build/main-test.js" '(t===`darwin`||t===`linux`)&&e.computerUse'
-    assert_not_contains "$extracted/.vite/build/main-test.js" 't===`darwin`&&e.computerUse'
+    assert_contains "$extracted/.vite/build/main-test.js" 'if(!((e.platform!==`darwin`&&e.platform!==`linux`)||!e.marketplacePluginNames.includes(`computer-use`))'
+    assert_contains "$extracted/.vite/build/main-test.js" 'return e.platform===`darwin`&&e.desktopFeatureAvailability.computerUseNodeRepl?`node-repl`:`legacy-mcp`'
+    assert_not_contains "$extracted/.vite/build/main-test.js" 'if(!(e.platform!==`darwin`||!e.marketplacePluginNames.includes(`computer-use`)))return e.desktopFeatureAvailability.computerUseNodeRepl?`node-repl`:`legacy-mcp`'
 
     node "$REPO_DIR/scripts/patch-linux-window-ui.js" "$extracted" >"$output_log" 2>&1
-    assert_occurrence_count "$extracted/.vite/build/main-test.js" '(t===`darwin`||t===`linux`)&&e.computerUse' '1'
+    assert_occurrence_count "$extracted/.vite/build/main-test.js" 'return e.platform===`darwin`&&e.desktopFeatureAvailability.computerUseNodeRepl?`node-repl`:`legacy-mcp`' '1'
 }
 
 test_linux_computer_use_ui_opt_in_smoke() {
@@ -5522,7 +5790,8 @@ test_linux_computer_use_ui_opt_in_smoke() {
 let n={app:{whenReady(){},quit(){},requestSingleInstanceLock(){},on(){},off(){}}};
 let cp=require(`node:child_process`),fs=require(`node:fs`),p=require(`node:path`),os=require(`node:os`);
 let Qt=`openai-bundled`,$t=`browser-use`,en=`chrome-internal`,tn=`computer-use`,nn=`latex-tectonic`;
-var $n=[{name:tn,isEnabled:({features:e,platform:t})=>t===`darwin`&&e.computerUse,migrate:wn}];
+function cl(e){if(!(e.platform!==`darwin`||!e.marketplacePluginNames.includes(`computer-use`)))return e.desktopFeatureAvailability.computerUseNodeRepl?`node-repl`:`legacy-mcp`}
+var $n=[{name:tn,isEnabled:cl,migrate:wn}];
 function me(e,{env:t=process.env,platform:n=process.platform}={}){return n!==`win32`||t.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE!==`1`?e:{...e,computerUse:!0,computerUseNodeRepl:!0}}
 var h={handlers:{"native-desktop-apps":async()=>({apps:[]})}};
 JS
@@ -5559,7 +5828,9 @@ JS
         env -u CODEX_LINUX_ENABLE_COMPUTER_USE_UI -u CODEX_LINUX_APP_ID -u CODEX_APP_ID -u CODEX_LINUX_SETTINGS_FILE \
         HOME="$fake_home" XDG_CONFIG_HOME="$fake_home/.config" \
         node "$REPO_DIR/scripts/patch-linux-window-ui.js" "$extracted" >"$output_log" 2>&1
-    assert_contains "$main_bundle" '(t===`darwin`||t===`linux`)&&e.computerUse'
+    assert_contains "$main_bundle" 'if(!((e.platform!==`darwin`&&e.platform!==`linux`)||!e.marketplacePluginNames.includes(`computer-use`))'
+    assert_contains "$main_bundle" 'return e.platform===`darwin`&&e.desktopFeatureAvailability.computerUseNodeRepl?`node-repl`:`legacy-mcp`'
+    assert_not_contains "$main_bundle" 'if(!(e.platform!==`darwin`||!e.marketplacePluginNames.includes(`computer-use`)))return e.desktopFeatureAvailability.computerUseNodeRepl?`node-repl`:`legacy-mcp`'
     assert_not_contains "$main_bundle" 'return n===`linux`?{...e,computerUse:!0,computerUseNodeRepl:!0}'
     assert_not_contains "$main_bundle" 'codexLinuxNativeDesktopApps'
     assert_not_contains "$renderer_asset" 'function hae(e){return e===`macOS`||e===`windows`||e===`linux`}'
@@ -5578,7 +5849,8 @@ JS
     env -u CODEX_LINUX_APP_ID -u CODEX_APP_ID -u CODEX_LINUX_SETTINGS_FILE \
         CODEX_LINUX_ENABLE_COMPUTER_USE_UI=1 HOME="$fake_home" XDG_CONFIG_HOME="$fake_home/.config" \
         node "$REPO_DIR/scripts/patch-linux-window-ui.js" "$extracted" >"$output_log" 2>&1
-    assert_contains "$main_bundle" '(t===`darwin`||t===`linux`)&&e.computerUse'
+    assert_contains "$main_bundle" 'if(!((e.platform!==`darwin`&&e.platform!==`linux`)||!e.marketplacePluginNames.includes(`computer-use`))'
+    assert_contains "$main_bundle" 'return e.platform===`darwin`&&e.desktopFeatureAvailability.computerUseNodeRepl?`node-repl`:`legacy-mcp`'
     assert_contains "$main_bundle" 'return n===`linux`?{...e,computerUse:!0,computerUseNodeRepl:!0}'
     assert_contains "$main_bundle" 'codexLinuxNativeDesktopApps'
     assert_contains "$main_bundle" '"computer-use-native-desktop-app-icon":async(e)=>process.platform===`linux`?codexLinuxNativeDesktopAppIcon(e):{iconSmall:``}'
@@ -6458,6 +6730,7 @@ main() {
     test_installer_refreshes_stale_cached_dmg_metadata
     test_extract_dmg_repairs_safe_7z_link_warnings
     test_fresh_install_removes_cached_dmg_metadata
+    test_fresh_pinned_dmg_preserves_cached_dmg_metadata
     test_fresh_reuse_dmg_uses_cache_when_metadata_matches
     test_rebuild_candidate_uses_validated_default_dmg
     test_native_shortcut_targets_compose_existing_flows
@@ -6485,6 +6758,9 @@ main() {
     test_setup_native_wizard_dry_run_cleanup_does_not_delete_confirmed_paths
     test_setup_native_wizard_cleanup_deletes_only_confirmed_paths
     test_upstream_build_app_workflow_tracks_dmg_metadata
+    test_update_nix_hashes_skips_unchanged_package_verification
+    test_update_nix_hashes_verifies_changed_pins
+    test_update_nix_hashes_verifies_changed_dmg_hash
     test_installer_detects_electron_version_from_plist
     test_installer_keeps_electron_fallback_for_bad_metadata
     test_port_validation_rejects_oversized_numeric_values
