@@ -1940,6 +1940,153 @@ test_fedora_dependency_bootstrap_installs_rpmbuild() {
     assert_contains "$readme" "sudo dnf install python3 p7zip p7zip-plugins curl unzip rpm-build make gcc-c++"
 }
 
+test_fedora_atomic_rpm_ostree_target_detection() {
+    info "Checking Fedora Atomic rpm-ostree target detection"
+    local workspace="$TMP_DIR/fedora-atomic-target"
+    local fake_bin="$workspace/bin"
+    local os_release="$workspace/os-release"
+    local ostree_booted="$workspace/ostree-booted"
+    local install_log="$workspace/install-deps.log"
+    local wizard_log="$workspace/bootstrap-wizard.log"
+    local helper_output="$workspace/helper-output.log"
+
+    mkdir -p "$fake_bin"
+    printf '%s\n' '#!/bin/sh' 'exit 0' > "$fake_bin/rpm-ostree"
+    printf '%s\n' '#!/bin/sh' 'exit 0' > "$fake_bin/rpmbuild"
+    chmod +x "$fake_bin/rpm-ostree" "$fake_bin/rpmbuild"
+    cat > "$os_release" <<'EOF'
+ID=fedora
+ID_LIKE=
+VERSION_ID="44"
+PRETTY_NAME="Fedora Linux 44 (KDE Plasma Desktop Edition)"
+VARIANT_ID=kde
+EOF
+    : > "$ostree_booted"
+
+    PATH="$fake_bin:/usr/bin:/bin" \
+    OS_RELEASE_FILE="$os_release" \
+    OSTREE_BOOTED_FILE="$ostree_booted" \
+    DETECT_ONLY=1 \
+        bash "$REPO_DIR/scripts/install-deps.sh" >"$install_log"
+    assert_contains "$install_log" "Detected dependency profile: rpm-ostree"
+    assert_contains "$install_log" "ID=fedora"
+    assert_not_contains "$install_log" "ID_LIKE=ubuntu"
+
+    local missing_bin="$workspace/missing-bin"
+    local missing_log="$workspace/install-deps-missing.log"
+    mkdir -p "$missing_bin"
+    for command in dirname pwd uname; do
+        ln -s "$(command -v "$command")" "$missing_bin/$command"
+    done
+    printf '%s\n' '#!/bin/sh' 'exit 0' > "$missing_bin/rpm-ostree"
+    chmod +x "$missing_bin/rpm-ostree"
+
+    local status=0
+    PATH="$missing_bin" \
+    OS_RELEASE_FILE="$os_release" \
+    OSTREE_BOOTED_FILE="$ostree_booted" \
+    HOME="$workspace/home-missing" \
+        /bin/bash "$REPO_DIR/scripts/install-deps.sh" >"$missing_log" 2>&1 || status=$?
+    [ "$status" -ne 0 ] || fail "Expected rpm-ostree install-deps to stop before packages are layered"
+    assert_contains "$missing_log" "sudo rpm-ostree install python3 7zip curl unzip rpm-build make gcc-c++"
+    assert_contains "$missing_log" "Still missing:"
+    assert_not_contains "$missing_log" "nodejs npm"
+
+    local layered_bin="$workspace/layered-bin"
+    local layered_log="$workspace/install-deps-layered.log"
+    mkdir -p "$layered_bin"
+    for command in dirname pwd uname grep; do
+        ln -s "$(command -v "$command")" "$layered_bin/$command"
+    done
+    for command in rpm-ostree python3 7zz curl unzip rpmbuild make g++ cargo; do
+        cat > "$layered_bin/$command" <<'SCRIPT'
+#!/bin/sh
+command_name="${0##*/}"
+case "$command_name" in
+    7zz) echo "7-Zip 26.00" ;;
+    cargo) echo "cargo 1.96.0" ;;
+    *) exit 0 ;;
+esac
+SCRIPT
+        chmod +x "$layered_bin/$command"
+    done
+
+    PATH="$layered_bin" \
+    OS_RELEASE_FILE="$os_release" \
+    OSTREE_BOOTED_FILE="$ostree_booted" \
+    HOME="$workspace/home-layered" \
+        /bin/bash "$REPO_DIR/scripts/install-deps.sh" >"$layered_log" 2>&1
+    assert_contains "$layered_log" "rpm-ostree layered build dependencies are already available"
+    assert_contains "$layered_log" "Skipping system Node.js check; install.sh provides the managed Node.js runtime"
+    assert_contains "$layered_log" "All dependencies installed"
+    assert_not_contains "$layered_log" "Node.js 20+ with npm and npx is required"
+
+    PATH="$fake_bin:/usr/bin:/bin" \
+    OS_RELEASE_FILE="$os_release" \
+    OSTREE_BOOTED_FILE="$ostree_booted" \
+    CODEX_BOOTSTRAP_DRY_RUN=1 \
+    CODEX_BOOTSTRAP_NONINTERACTIVE=1 \
+    CODEX_LINUX_FEATURES_ROOT="$REPO_DIR/linux-features" \
+    CODEX_LINUX_FEATURES_CONFIG="$workspace/features.json" \
+        bash "$REPO_DIR/scripts/bootstrap-wizard.sh" >"$wizard_log"
+    assert_contains "$wizard_log" "Package manager: rpm-ostree"
+    assert_contains "$wizard_log" "Native package format: rpm"
+    assert_contains "$wizard_log" "Atomic host: yes"
+
+    CODEX_LINUX_TARGET_ATOMIC=maybe \
+    PATH="$fake_bin:/usr/bin:/bin" \
+    OS_RELEASE_FILE="$os_release" \
+    OSTREE_BOOTED_FILE="$ostree_booted" \
+    bash -c '
+        # shellcheck disable=SC1091
+        source "$1"
+        OS_RELEASE_ID="$(os_release_field ID)"
+        OS_RELEASE_ID_LIKE="$(os_release_field ID_LIKE 2>/dev/null || true)"
+        OS_RELEASE_VERSION_ID="$(os_release_field VERSION_ID)"
+        printf "manager=%s\natomic=%s\n" \
+            "$(detect_package_manager)" \
+            "$(linux_target_is_atomic && echo yes || echo no)"
+    ' _ "$REPO_DIR/scripts/lib/linux-target-detect.sh" >"$helper_output"
+    assert_contains "$helper_output" "manager=rpm-ostree"
+    assert_contains "$helper_output" "atomic=yes"
+
+    CODEX_LINUX_TARGET_ATOMIC=0 \
+    PATH="$fake_bin:/usr/bin:/bin" \
+    OS_RELEASE_FILE="$os_release" \
+    OSTREE_BOOTED_FILE="$ostree_booted" \
+    bash -c '
+        # shellcheck disable=SC1091
+        source "$1"
+        OS_RELEASE_ID="$(os_release_field ID)"
+        OS_RELEASE_ID_LIKE="$(os_release_field ID_LIKE 2>/dev/null || true)"
+        OS_RELEASE_VERSION_ID="$(os_release_field VERSION_ID)"
+        printf "manager=%s\natomic=%s\n" \
+            "$(detect_package_manager)" \
+            "$(linux_target_is_atomic && echo yes || echo no)"
+    ' _ "$REPO_DIR/scripts/lib/linux-target-detect.sh" >"$helper_output"
+    assert_contains "$helper_output" "manager=unknown"
+    assert_contains "$helper_output" "atomic=no"
+
+    rm -f "$ostree_booted"
+    PATH="$fake_bin:/usr/bin:/bin" \
+    OS_RELEASE_FILE="$os_release" \
+    OSTREE_BOOTED_FILE="$ostree_booted" \
+    bash -c '
+        # shellcheck disable=SC1091
+        source "$1"
+        OS_RELEASE_ID="$(os_release_field ID)"
+        OS_RELEASE_ID_LIKE="$(os_release_field ID_LIKE 2>/dev/null || true)"
+        OS_RELEASE_VERSION_ID="$(os_release_field VERSION_ID)"
+        printf "manager=%s\nformat=%s\natomic=%s\n" \
+            "$(detect_package_manager)" \
+            "$(detect_package_format)" \
+            "$(linux_target_is_atomic && echo yes || echo no)"
+    ' _ "$REPO_DIR/scripts/lib/linux-target-detect.sh" >"$helper_output"
+    assert_contains "$helper_output" "manager=unknown"
+    assert_contains "$helper_output" "format=rpm"
+    assert_contains "$helper_output" "atomic=no"
+}
+
 test_setup_native_wizard_noninteractive_feature_writer() {
     info "Checking setup-native wizard non-interactive feature writer"
     local workspace="$TMP_DIR/setup-native-writer"
@@ -6846,6 +6993,7 @@ main() {
     test_rebuild_candidate_uses_validated_default_dmg
     test_native_shortcut_targets_compose_existing_flows
     test_fedora_dependency_bootstrap_installs_rpmbuild
+    test_fedora_atomic_rpm_ostree_target_detection
     test_setup_native_wizard_noninteractive_feature_writer
     test_setup_native_wizard_rejects_invalid_feature_ids
     test_setup_native_wizard_rejects_features_without_readme

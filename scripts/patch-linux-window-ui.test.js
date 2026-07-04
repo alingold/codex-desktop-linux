@@ -606,6 +606,93 @@ test("package profile distinguishes Fedora package managers by major version", (
   assert.equal(packageProfile(fedora41).packageManager, "dnf5");
 });
 
+test("package profile identifies Fedora Atomic hosts that use rpm-ostree", () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-fedora-atomic-target-"));
+  try {
+    const binDir = path.join(tempRoot, "bin");
+    const ostreeBootedPath = path.join(tempRoot, "ostree-booted");
+    fs.mkdirSync(binDir, { recursive: true });
+    for (const command of ["rpm-ostree", "rpmbuild"]) {
+      const commandPath = path.join(binDir, command);
+      fs.writeFileSync(commandPath, "#!/bin/sh\nexit 0\n", "utf8");
+      fs.chmodSync(commandPath, 0o755);
+    }
+    fs.writeFileSync(ostreeBootedPath, "", "utf8");
+
+    const fedoraAtomic = detectLinuxTargetContext({
+      osReleaseFields: {
+        ID: "fedora",
+        ID_LIKE: "",
+        VERSION_ID: "44",
+        PRETTY_NAME: "Fedora Linux 44 (KDE Plasma Desktop Edition)",
+      },
+      env: {
+        PATH: binDir,
+        OSTREE_BOOTED_FILE: ostreeBootedPath,
+      },
+    });
+
+    assert.equal(fedoraAtomic.atomic, true);
+    assert.equal(fedoraAtomic.packageFormat, "rpm");
+    assert.equal(fedoraAtomic.packageManager, "rpm-ostree");
+    assert.equal(fedoraAtomic.packageManagerIs("rpm-ostree"), true);
+    assert.equal(packageProfile(fedoraAtomic).id, "fedora-atomic");
+    assert.equal(packageProfile(fedoraAtomic).packageManager, "rpm-ostree");
+
+    const fedoraInvalidAtomicOverride = detectLinuxTargetContext({
+      osReleaseFields: {
+        ID: "fedora",
+        ID_LIKE: "",
+        VERSION_ID: "44",
+      },
+      env: {
+        PATH: binDir,
+        CODEX_LINUX_TARGET_ATOMIC: "maybe",
+        OSTREE_BOOTED_FILE: ostreeBootedPath,
+      },
+    });
+
+    assert.equal(fedoraInvalidAtomicOverride.atomic, true);
+    assert.equal(fedoraInvalidAtomicOverride.packageManager, "rpm-ostree");
+
+    const fedoraAtomicOverrideOff = detectLinuxTargetContext({
+      osReleaseFields: {
+        ID: "fedora",
+        ID_LIKE: "",
+        VERSION_ID: "44",
+      },
+      env: {
+        PATH: binDir,
+        CODEX_LINUX_TARGET_ATOMIC: "0",
+        OSTREE_BOOTED_FILE: ostreeBootedPath,
+      },
+    });
+
+    assert.equal(fedoraAtomicOverrideOff.atomic, false);
+    assert.equal(fedoraAtomicOverrideOff.packageManager, "unknown");
+    assert.equal(packageProfile(fedoraAtomicOverrideOff).id, "fedora-41-plus");
+
+    const fedoraRegular = detectLinuxTargetContext({
+      osReleaseFields: {
+        ID: "fedora",
+        ID_LIKE: "",
+        VERSION_ID: "44",
+        PRETTY_NAME: "Fedora Linux 44",
+      },
+      env: {
+        PATH: binDir,
+        OSTREE_BOOTED_FILE: path.join(tempRoot, "missing-ostree-booted"),
+      },
+    });
+
+    assert.equal(fedoraRegular.atomic, false);
+    assert.equal(fedoraRegular.packageManager, "unknown");
+    assert.equal(packageProfile(fedoraRegular).id, "fedora-41-plus");
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("auto-discovered core patches can target a specific Linux distro", () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-core-patch-root-"));
   try {
