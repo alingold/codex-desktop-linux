@@ -63,6 +63,67 @@ make setup-native
 See [Native setup](docs/native-setup.md) for the wizard, non-interactive
 feature selection, cleanup flow, and `PACKAGE_WITH_UPDATER=0`.
 
+## Uninstall
+
+Close Codex Desktop first, then remove the native package with your distro's
+package manager:
+
+```bash
+# Debian / Ubuntu
+sudo apt remove codex-desktop
+
+# Fedora
+sudo dnf remove codex-desktop
+
+# openSUSE
+sudo zypper remove codex-desktop
+
+# Arch / Manjaro
+sudo pacman -R codex-desktop
+```
+
+Native package removal stops and disables `codex-update-manager.service` when
+the service is installed. If the service was left behind by an older package or
+a manual install, disable it explicitly:
+
+```bash
+systemctl --user disable --now codex-update-manager.service
+```
+
+AppImage builds are not installed system-wide by this repository; delete the
+AppImage file you created. A repo-only generated app can be removed from the
+checkout with:
+
+```bash
+rm -rf codex-app
+```
+
+`nix run github:ilysenko/codex-desktop-linux` is ephemeral. If you installed
+the flake through a Nix profile, Home Manager, or a NixOS module, remove that
+profile or configuration entry and rebuild your profile/system.
+
+User data is preserved for reinstall. To remove only this wrapper's local app
+state, logs, launcher flags, and updater state, delete these paths.
+
+If you enabled Remote Mobile Control, `~/.config/codex-desktop` can contain
+`remote-control-device-keys-v1.json`. Revoke paired devices in Codex
+Settings/Connections or ChatGPT before deleting that file or removing the whole
+directory. For feature-owned data, prefer the cleanup flow in
+[Native setup](docs/native-setup.md#feature-cleanup).
+
+```bash
+rm -rf \
+  ~/.config/codex-desktop \
+  ~/.local/state/codex-desktop \
+  ~/.cache/codex-desktop \
+  ~/.config/codex-update-manager \
+  ~/.local/state/codex-update-manager \
+  ~/.cache/codex-update-manager
+```
+
+Do not remove `~/.codex` unless you also want to delete your Codex CLI
+configuration and project state.
+
 ## Before You Install
 
 The generated app and native packages bundle a managed Linux Node.js runtime.
