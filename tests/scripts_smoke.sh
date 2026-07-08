@@ -4015,6 +4015,14 @@ EOF
     output="$(env -i PATH="$PATH" HOME="$HOME" XDG_SESSION_TYPE=wayland CODEX_LINUX_RENDERING_MODE=default "$launcher_probe" probe)"
     [[ "$output" == *"comp=1"* && "$output" == *"<--disable-gpu-compositing>"* ]] || fail "Wayland default profile must disable GPU compositing for side-panel stability: $output"
 
+    local drm_stub_dir="$TMP_DIR/drm-stubs/two"
+    mkdir -p "$drm_stub_dir/card0-DP-2" "$drm_stub_dir/card0-HDMI-3"
+    printf '%s\n' connected > "$drm_stub_dir/card0-DP-2/status"
+    printf '%s\n' connected > "$drm_stub_dir/card0-HDMI-3/status"
+    output="$(env -i PATH="$PATH" HOME="$HOME" CODEX_DRM_CLASS_ROOT="$drm_stub_dir" DISPLAY=:0 XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=ubuntu:GNOME "$launcher_probe" probe)"
+    [[ "$output" == *"mode=gnome-wayland-multi-monitor"* && "$output" == *"<--ozone-platform=x11>"* ]] || fail "GNOME Wayland multi-monitor auto profile must force X11 for stable maximize/scale behavior: $output"
+    [[ "$output" != *"<--ozone-platform-hint=auto>"* ]] || fail "GNOME Wayland multi-monitor auto profile must not leave backend selection to Electron: $output"
+
     output="$(env -i PATH="$PATH" HOME="$HOME" XDG_SESSION_TYPE=wayland CODEX_LINUX_RENDERING_MODE=default CODEX_ELECTRON_DISABLE_GPU_COMPOSITING=0 "$launcher_probe" probe)"
     [[ "$output" == *"comp=0"* && "$output" != *"<--disable-gpu-compositing>"* ]] || fail "CODEX_ELECTRON_DISABLE_GPU_COMPOSITING=0 must suppress the Wayland compositor workaround: $output"
 
