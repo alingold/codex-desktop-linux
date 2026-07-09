@@ -5358,10 +5358,14 @@ test("restarts late-event hydration when a pending queue exists without an in-fl
 test("discovers current app-server conversation core Linux webview patches", () => {
   const currentConversationAsset =
     "app-initial~app-main~worktree-init-v2-page~remote-conversation-page~new-thread-panel-page~o~bj5tp28r-Dcs9S3fj.js";
+  const latestConversationAsset =
+    "app-initial~app-main~new-thread-panel-page~appgen-library-page~hotkey-window-thread-page~ho~glxlkd48-Bty5T9_s.js";
   const oldConversationAsset =
     "app-initial~app-main~hotkey-window-thread-page~thread-app-shell-chrome~header~remote-conver~h59fr3q5-Cm3GYhJA.js";
   const projectlessRemoteTaskAsset =
     "app-initial~app-main~worktree-init-v2-page~remote-conversation-page~pull-requests-page~plug~kmtatxxf-DEE2TwPG.js";
+  const latestProjectlessRemoteTaskAsset =
+    "app-initial~app-main~new-thread-panel-page~appgen-library-page~hotkey-window-thread-page~ho~iufn7mg3-MXsOJYYa.js";
 
   for (const id of ["linux-app-server-conversation-hydration", "linux-completed-item-recovery"]) {
     const descriptor = corePatchDescriptors().find((patch) => patch.id === id);
@@ -5370,9 +5374,12 @@ test("discovers current app-server conversation core Linux webview patches", () 
     assert.equal(descriptor.phase, "webview-asset");
     assert.equal(descriptor.ciPolicy, "optional");
     assert.match(String(descriptor.pattern), /worktree-init-v2-page/);
+    assert.match(String(descriptor.pattern), /glxlkd48/);
     assert.equal(descriptor.pattern.test(currentConversationAsset), true);
+    assert.equal(descriptor.pattern.test(latestConversationAsset), true);
     assert.equal(descriptor.pattern.test(oldConversationAsset), false);
     assert.equal(descriptor.pattern.test(projectlessRemoteTaskAsset), false);
+    assert.equal(descriptor.pattern.test(latestProjectlessRemoteTaskAsset), false);
     assert.equal(descriptor.pattern.test("app-server-manager-signals-test.js"), false);
     assert.equal(descriptor.pattern.test("remote-connections-settings-fixture.js"), false);
   }
@@ -8627,6 +8634,58 @@ test("criticalFailuresFromReport agrees with validateReport and skips non-applic
   assert.ok(failures.some((failure) => failure.startsWith("req-bad:")));
   assert.ok(!failures.some((failure) => failure.startsWith("req-not-applicable:")));
   assert.ok(!failures.some((failure) => failure.startsWith("opt-bad:")));
+});
+
+test("validateReport can require enabled features and successful patch entries", () => {
+  const report = {
+    enabledFeatures: ["remote-mobile-control"],
+    patches: [
+      {
+        name: "feature:remote-mobile-control:linux-remote-control-load-gate",
+        status: "applied",
+        ciPolicy: "optional",
+      },
+      {
+        name: "linux-app-server-conversation-hydration",
+        status: "already-applied",
+        ciPolicy: "optional",
+      },
+      {
+        name: "feature:remote-mobile-control:linux-remote-mobile-projectless-remote-task",
+        status: "skipped-optional",
+        ciPolicy: "optional",
+        reason: "missing sidebar project groups bundle",
+      },
+    ],
+  };
+
+  const failures = validateReport(report, "feature-probe", {
+    requiredEnabledFeatures: ["remote-mobile-control", "missing-feature"],
+    requiredSuccessfulPatches: [
+      "feature:remote-mobile-control:linux-remote-control-load-gate",
+      "linux-app-server-conversation-hydration",
+      "feature:remote-mobile-control:linux-remote-mobile-projectless-remote-task",
+      "feature:remote-mobile-control:missing-entry",
+    ],
+  });
+
+  assert.ok(
+    !failures.some((failure) =>
+      failure.startsWith("feature:remote-mobile-control:linux-remote-control-load-gate:"),
+    ),
+  );
+  assert.ok(
+    !failures.some((failure) => failure.startsWith("linux-app-server-conversation-hydration:")),
+  );
+  assert.ok(failures.includes("feature missing-feature: not enabled in patch report"));
+  assert.ok(
+    failures.some((failure) =>
+      failure.startsWith(
+        "feature:remote-mobile-control:linux-remote-mobile-projectless-remote-task: skipped-optional",
+      ),
+    ),
+  );
+  assert.ok(failures.includes("feature:remote-mobile-control:missing-entry: missing from patch report"));
 });
 
 test("terminal user PATH patch drift is reported as optional", () => {

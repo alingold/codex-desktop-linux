@@ -54,6 +54,10 @@ const CURRENT_PROJECTLESS_REMOTE_TASK_ASSET =
   "app-initial~app-main~worktree-init-v2-page~remote-conversation-page~pull-requests-page~plug~test.js";
 const REMOTE_CONTROL_STATUS_ASSET =
   "app-initial~app-main~pull-request-code-review~onboarding-page~hotkey-window-thread-page~cha~b76hmflu-test.js";
+const LATEST_REMOTE_CONVERSATION_ASSET =
+  "app-initial~app-main~new-thread-panel-page~appgen-library-page~hotkey-window-thread-page~ho~glxlkd48-test.js";
+const LATEST_PROJECTLESS_REMOTE_TASK_ASSET =
+  "app-initial~app-main~new-thread-panel-page~appgen-library-page~hotkey-window-thread-page~ho~iufn7mg3-test.js";
 
 function syntheticMainBundle() {
   return [
@@ -766,8 +770,10 @@ test("remote mobile control feature exposes opt-in main-bundle and webview patch
     );
     assert.ok(statusGuardDescriptor);
     assert.equal(statusGuardDescriptor.pattern.test(CURRENT_REMOTE_CONVERSATION_ASSET), true);
+    assert.equal(statusGuardDescriptor.pattern.test(LATEST_REMOTE_CONVERSATION_ASSET), true);
     assert.equal(statusGuardDescriptor.pattern.test(OLD_APP_SERVER_MANAGER_ASSET), false);
     assert.equal(statusGuardDescriptor.pattern.test("app-server-manager-signals-test.js"), false);
+    assert.equal(statusGuardDescriptor.pattern.test(LATEST_PROJECTLESS_REMOTE_TASK_ASSET), false);
 
     const statusWaitDescriptor = descriptors.find((descriptor) =>
       descriptor.id === "feature:remote-mobile-control:linux-remote-control-status-wait"
@@ -781,25 +787,31 @@ test("remote mobile control feature exposes opt-in main-bundle and webview patch
     );
     assert.ok(hydrationDescriptor);
     assert.equal(hydrationDescriptor.pattern.test(CURRENT_REMOTE_CONVERSATION_ASSET), true);
+    assert.equal(hydrationDescriptor.pattern.test(LATEST_REMOTE_CONVERSATION_ASSET), true);
     assert.equal(hydrationDescriptor.pattern.test(OLD_APP_SERVER_MANAGER_ASSET), false);
     assert.equal(hydrationDescriptor.pattern.test("app-server-manager-signals-test.js"), false);
     assert.equal(hydrationDescriptor.pattern.test("remote-connections-settings-fixture.js"), false);
+    assert.equal(hydrationDescriptor.pattern.test(LATEST_PROJECTLESS_REMOTE_TASK_ASSET), false);
 
     const loadGateDescriptor = descriptors.find((descriptor) =>
       descriptor.id === "feature:remote-mobile-control:linux-remote-control-load-gate"
     );
     assert.ok(loadGateDescriptor);
     assert.equal(loadGateDescriptor.pattern.test(CURRENT_REMOTE_CONVERSATION_ASSET), true);
+    assert.equal(loadGateDescriptor.pattern.test(LATEST_REMOTE_CONVERSATION_ASSET), true);
     assert.equal(loadGateDescriptor.pattern.test(OLD_REMOTE_CONTROL_GATE_ASSET), false);
     assert.equal(loadGateDescriptor.pattern.test("remote-connection-visibility-test.js"), false);
+    assert.equal(loadGateDescriptor.pattern.test(LATEST_PROJECTLESS_REMOTE_TASK_ASSET), false);
 
     const projectlessRemoteTaskDescriptor = descriptors.find((descriptor) =>
       descriptor.id === "feature:remote-mobile-control:linux-remote-mobile-projectless-remote-task"
     );
     assert.ok(projectlessRemoteTaskDescriptor);
     assert.equal(projectlessRemoteTaskDescriptor.pattern.test(CURRENT_PROJECTLESS_REMOTE_TASK_ASSET), true);
+    assert.equal(projectlessRemoteTaskDescriptor.pattern.test(LATEST_PROJECTLESS_REMOTE_TASK_ASSET), true);
     assert.equal(projectlessRemoteTaskDescriptor.pattern.test(OLD_REMOTE_CONTROL_GATE_ASSET), false);
     assert.equal(projectlessRemoteTaskDescriptor.pattern.test(CURRENT_REMOTE_CONVERSATION_ASSET), false);
+    assert.equal(projectlessRemoteTaskDescriptor.pattern.test(LATEST_REMOTE_CONVERSATION_ASSET), false);
   });
 });
 

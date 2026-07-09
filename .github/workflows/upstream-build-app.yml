@@ -10,6 +10,7 @@ on:
       - scripts/patch-linux-window-ui.js
       - scripts/patch-linux-window-ui.test.js
       - scripts/patches/**
+      - linux-features/remote-mobile-control/**
       - scripts/ci/validate-patch-report.js
       - .github/workflows/upstream-build-app.yml
   push:
@@ -21,6 +22,7 @@ on:
       - scripts/patch-linux-window-ui.js
       - scripts/patch-linux-window-ui.test.js
       - scripts/patches/**
+      - linux-features/remote-mobile-control/**
       - scripts/ci/validate-patch-report.js
       - .github/workflows/upstream-build-app.yml
   workflow_dispatch:
@@ -140,6 +142,30 @@ jobs:
       - name: Validate required upstream patches
         run: node scripts/ci/validate-patch-report.js patch-report.json --profile upstream-build
 
+      - name: Inspect upstream DMG with remote mobile control enabled
+        run: |
+          set -euo pipefail
+
+          features_config="$(mktemp)"
+          report_dir="$GITHUB_WORKSPACE/remote-mobile-upstream-inspect"
+          trap 'rm -f "$features_config"' EXIT
+
+          printf '%s\n' '{"enabled":["remote-mobile-control"]}' > "$features_config"
+
+          CODEX_LINUX_FEATURES_CONFIG="$features_config" \
+            make inspect-upstream DMG="$UPSTREAM_DMG_PATH" REBUILD_REPORT_DIR="$report_dir"
+
+          node scripts/ci/validate-patch-report.js "$report_dir/patch-report.json" \
+            --profile upstream-build \
+            --require-enabled-feature remote-mobile-control \
+            --require-success linux-app-server-conversation-hydration \
+            --require-success linux-completed-item-recovery \
+            --require-success feature:remote-mobile-control:linux-remote-control-load-gate \
+            --require-success feature:remote-mobile-control:linux-remote-mobile-conversation-hydration \
+            --require-success feature:remote-mobile-control:linux-remote-control-status-read-guard \
+            --require-success feature:remote-mobile-control:linux-remote-control-status-wait \
+            --require-success feature:remote-mobile-control:linux-remote-mobile-projectless-remote-task
+
       - name: Upload upstream DMG metadata artifact
         # The build step now aborts on critical patch failures; keep uploading
         # the patch report so the failure is diagnosable from the artifact.
@@ -150,6 +176,7 @@ jobs:
           path: |
             upstream-dmg-metadata.json
             patch-report.json
+            remote-mobile-upstream-inspect/*.json
           if-no-files-found: ignore
 
       - name: Write build summary
@@ -167,4 +194,6 @@ jobs:
             echo "- Cache Hit: \`${{ steps.dmg-cache.outputs.cache-hit || 'false' }}\`"
             echo "- Build command: \`make build-app DMG=/tmp/codex-upstream-ci/Codex.dmg\`"
             echo "- Patch report: \`patch-report.json\`"
+            echo "- Remote mobile inspect: \`make inspect-upstream DMG=$UPSTREAM_DMG_PATH\` with \`remote-mobile-control\` enabled"
+            echo "- Remote mobile patch report: \`remote-mobile-upstream-inspect/patch-report.json\`"
           } >> "$GITHUB_STEP_SUMMARY"
