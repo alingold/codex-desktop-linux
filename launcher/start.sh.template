@@ -564,13 +564,14 @@ export_packaged_runtime_env() {
 prepend_managed_node_runtime_to_path() {
     [ -x "$MANAGED_NODE_BIN_DIR/node" ] || return 0
 
+    local current_path="${PATH:-}"
     if [ -z "${CODEX_LINUX_USER_PATH+x}" ]; then
-        export CODEX_LINUX_USER_PATH="${PATH:-}"
+        export CODEX_LINUX_USER_PATH="$current_path"
     fi
 
-    case ":$PATH:" in
-        *":$MANAGED_NODE_BIN_DIR:"*) ;;
-        *) export PATH="$MANAGED_NODE_BIN_DIR:$PATH" ;;
+    case "$current_path" in
+        "$MANAGED_NODE_BIN_DIR"|"$MANAGED_NODE_BIN_DIR":*) ;;
+        *) export PATH="$MANAGED_NODE_BIN_DIR${current_path:+:$current_path}" ;;
     esac
     export CODEX_MANAGED_NODE_RUNTIME_DIR="$SCRIPT_DIR/resources/node-runtime"
 }

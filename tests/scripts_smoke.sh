@@ -3555,6 +3555,48 @@ test_bundled_plugin_builders_accept_prebuilt_binaries() {
     assert_contains "$output_log" "$host"
 }
 
+test_launcher_managed_node_handles_unset_path() {
+    info "Checking managed Node PATH setup without an inherited PATH"
+    local workspace="$TMP_DIR/launcher-unset-path"
+    local probe="$workspace/probe.sh"
+    local managed_node_bin_dir
+
+    managed_node_bin_dir="$(dirname "$(command -v node)")"
+    mkdir -p "$workspace"
+
+    cat > "$probe" <<EOF
+#!/usr/bin/env bash
+set -u
+SCRIPT_DIR=$(printf '%q' "$workspace")
+MANAGED_NODE_BIN_DIR=$(printf '%q' "$managed_node_bin_dir")
+EOF
+    awk '
+        /^prepend_managed_node_runtime_to_path\(\) \{/ { capture = 1 }
+        capture { print }
+        capture && /^}/ { exit }
+    ' "$REPO_DIR/launcher/start.sh.template" >> "$probe"
+    cat >> "$probe" <<'EOF'
+unset CODEX_LINUX_USER_PATH
+unset PATH
+prepend_managed_node_runtime_to_path
+[ "$PATH" = "$MANAGED_NODE_BIN_DIR" ] || exit 2
+[ "${CODEX_LINUX_USER_PATH+x}" = x ] || exit 3
+[ -z "$CODEX_LINUX_USER_PATH" ] || exit 4
+[ "$CODEX_MANAGED_NODE_RUNTIME_DIR" = "$SCRIPT_DIR/resources/node-runtime" ] || exit 5
+
+PATH="/tmp/untrusted:$MANAGED_NODE_BIN_DIR:/usr/bin"
+unset CODEX_LINUX_USER_PATH
+prepend_managed_node_runtime_to_path
+case "$PATH" in
+    "$MANAGED_NODE_BIN_DIR":*) ;;
+    *) exit 6 ;;
+esac
+[ "$CODEX_LINUX_USER_PATH" = "/tmp/untrusted:$MANAGED_NODE_BIN_DIR:/usr/bin" ] || exit 7
+EOF
+
+    /usr/bin/bash "$probe" || fail "Expected managed Node PATH setup to tolerate an unset PATH"
+}
+
 test_launcher_template_sanity() {
     info "Checking launcher template markers"
     assert_contains "$REPO_DIR/install.sh" 'DEFAULT_CODEX_WEBVIEW_PORT=5175'
@@ -3798,9 +3840,9 @@ if "if needs_cold_start;" not in runtime_body:
     raise SystemExit("second-instance handoff must skip CLI preflight")
 if 'run_cold_start_hooks' not in runtime_body:
     raise SystemExit("cold start must run feature-staged hooks before Electron launches")
-if 'export CODEX_LINUX_USER_PATH="${PATH:-}"' not in source:
+if 'local current_path="${PATH:-}"' not in source or 'export CODEX_LINUX_USER_PATH="$current_path"' not in source:
     raise SystemExit("launcher must capture the user PATH before prepending the managed Node runtime")
-if source.index('export CODEX_LINUX_USER_PATH="${PATH:-}"') > source.index('export PATH="$MANAGED_NODE_BIN_DIR:$PATH"'):
+if source.index('export CODEX_LINUX_USER_PATH="$current_path"') > source.index('export PATH="$MANAGED_NODE_BIN_DIR${current_path:+:$current_path}"'):
     raise SystemExit("launcher must capture CODEX_LINUX_USER_PATH before mutating PATH for Electron")
 for name, body in (("prelaunch", prelaunch_hooks_body), ("cold-start", cold_start_hooks_body), ("launcher", launcher_hooks_body)):
     if 'CODEX_HOME="$CODEX_HOME"' not in body:
@@ -7481,6 +7523,7 @@ main() {
     test_chrome_browser_client_profile_root_variants
     test_chrome_marketplace_fallback_synthesis
     test_chrome_native_host_manifest_writer
+    test_launcher_managed_node_handles_unset_path
     test_launcher_template_sanity
     test_launcher_cli_resolution_policy
     test_webview_server_cache_policy
