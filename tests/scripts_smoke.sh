@@ -5551,7 +5551,7 @@ test_linux_tray_patch_smoke() {
     mkdir -p "$workspace"
     bundle_body="$(cat <<'JS'
 let D={removeMenu(){},setMenuBarVisibility(){},setIcon(){},once(){}};
-let s=require(`node:url`),c=require(`electron`);c=e.o(c);let n=c,i=require(`node:path`),a=require(`node:fs`);
+let n=require(`electron`),i=require(`node:path`),a=require(`node:fs`);
 let t={join(){},C:{Prod:`prod`},A(){}};
 let k={hide(){},isDestroyed(){return false}};
 let f=`local`;
@@ -5707,7 +5707,7 @@ test_linux_explicit_quit_patch_smoke() {
 
     mkdir -p "$workspace"
     bundle_body="$(cat <<'JS'
-let n=require(`electron`),i=require(`node:path`),a=require(`node:fs`);
+let s=require(`node:url`),c=require(`electron`);c=e.o(c);let n=c,i=require(`node:path`),a=require(`node:fs`);
 var pb=class{getNativeTrayMenuItems(){return[{label:rB(this.appName),click:()=>{n.app.quit()}}]}};
 function qB(r,o){if(o.type===`quit-app`){n.app.quit();return}return o}
 n.app.on(`before-quit`,o=>{let s=BI(),c=t.sr().some(e=>e.status===`ACTIVE`);if(e||i.canQuitWithoutPrompt()||r||!s&&!c){g=!0,a.markAppQuitting();return}let l=n.app.getName();if(n.dialog.showMessageBoxSync({type:`warning`,buttons:[`Quit`,`Cancel`],defaultId:0,cancelId:1,noLink:!0,title:`Quit ${l}?`,message:`Quit ${l}?`,detail:vB({hasInProgressLocalConversation:s,hasEnabledAutomations:c})})!==0){o.preventDefault();return}i.markQuitApproved(),g=!0,a.markAppQuitting()});
