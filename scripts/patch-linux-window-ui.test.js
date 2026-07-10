@@ -5360,6 +5360,8 @@ test("discovers current app-server conversation core Linux webview patches", () 
     "app-initial~app-main~worktree-init-v2-page~remote-conversation-page~new-thread-panel-page~o~bj5tp28r-Dcs9S3fj.js";
   const latestConversationAsset =
     "app-initial~app-main~new-thread-panel-page~appgen-library-page~hotkey-window-thread-page~ho~glxlkd48-Bty5T9_s.js";
+  const unifiedConversationAsset =
+    "app-initial~app-main~pull-request-code-review~onboarding-page~hotkey-window-thread-page~cha~b76hmflu-y0KJWbm3.js";
   const oldConversationAsset =
     "app-initial~app-main~hotkey-window-thread-page~thread-app-shell-chrome~header~remote-conver~h59fr3q5-Cm3GYhJA.js";
   const projectlessRemoteTaskAsset =
@@ -5375,8 +5377,10 @@ test("discovers current app-server conversation core Linux webview patches", () 
     assert.equal(descriptor.ciPolicy, "optional");
     assert.match(String(descriptor.pattern), /worktree-init-v2-page/);
     assert.match(String(descriptor.pattern), /glxlkd48/);
+    assert.match(String(descriptor.pattern), /b76hmflu/);
     assert.equal(descriptor.pattern.test(currentConversationAsset), true);
     assert.equal(descriptor.pattern.test(latestConversationAsset), true);
+    assert.equal(descriptor.pattern.test(unifiedConversationAsset), true);
     assert.equal(descriptor.pattern.test(oldConversationAsset), false);
     assert.equal(descriptor.pattern.test(projectlessRemoteTaskAsset), false);
     assert.equal(descriptor.pattern.test(latestProjectlessRemoteTaskAsset), false);

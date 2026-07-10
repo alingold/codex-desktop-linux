@@ -52,12 +52,12 @@ const CURRENT_REMOTE_CONVERSATION_ASSET =
   "app-initial~app-main~worktree-init-v2-page~remote-conversation-page~new-thread-panel-page~o~test.js";
 const CURRENT_PROJECTLESS_REMOTE_TASK_ASSET =
   "app-initial~app-main~worktree-init-v2-page~remote-conversation-page~pull-requests-page~plug~test.js";
-const REMOTE_CONTROL_STATUS_ASSET =
-  "app-initial~app-main~pull-request-code-review~onboarding-page~hotkey-window-thread-page~cha~b76hmflu-test.js";
 const LATEST_REMOTE_CONVERSATION_ASSET =
   "app-initial~app-main~new-thread-panel-page~appgen-library-page~hotkey-window-thread-page~ho~glxlkd48-test.js";
 const LATEST_PROJECTLESS_REMOTE_TASK_ASSET =
   "app-initial~app-main~new-thread-panel-page~appgen-library-page~hotkey-window-thread-page~ho~iufn7mg3-test.js";
+const UNIFIED_REMOTE_CONVERSATION_ASSET =
+  "app-initial~app-main~pull-request-code-review~onboarding-page~hotkey-window-thread-page~cha~b76hmflu-test.js";
 
 function syntheticMainBundle() {
   return [
@@ -771,6 +771,7 @@ test("remote mobile control feature exposes opt-in main-bundle and webview patch
     assert.ok(statusGuardDescriptor);
     assert.equal(statusGuardDescriptor.pattern.test(CURRENT_REMOTE_CONVERSATION_ASSET), true);
     assert.equal(statusGuardDescriptor.pattern.test(LATEST_REMOTE_CONVERSATION_ASSET), true);
+    assert.equal(statusGuardDescriptor.pattern.test(UNIFIED_REMOTE_CONVERSATION_ASSET), true);
     assert.equal(statusGuardDescriptor.pattern.test(OLD_APP_SERVER_MANAGER_ASSET), false);
     assert.equal(statusGuardDescriptor.pattern.test("app-server-manager-signals-test.js"), false);
     assert.equal(statusGuardDescriptor.pattern.test(LATEST_PROJECTLESS_REMOTE_TASK_ASSET), false);
@@ -779,7 +780,7 @@ test("remote mobile control feature exposes opt-in main-bundle and webview patch
       descriptor.id === "feature:remote-mobile-control:linux-remote-control-status-wait"
     );
     assert.ok(statusWaitDescriptor);
-    assert.equal(statusWaitDescriptor.pattern.test(REMOTE_CONTROL_STATUS_ASSET), true);
+    assert.equal(statusWaitDescriptor.pattern.test(UNIFIED_REMOTE_CONVERSATION_ASSET), true);
     assert.equal(statusWaitDescriptor.pattern.test(OLD_APP_SERVER_MANAGER_ASSET), false);
 
     const hydrationDescriptor = descriptors.find((descriptor) =>
@@ -788,6 +789,7 @@ test("remote mobile control feature exposes opt-in main-bundle and webview patch
     assert.ok(hydrationDescriptor);
     assert.equal(hydrationDescriptor.pattern.test(CURRENT_REMOTE_CONVERSATION_ASSET), true);
     assert.equal(hydrationDescriptor.pattern.test(LATEST_REMOTE_CONVERSATION_ASSET), true);
+    assert.equal(hydrationDescriptor.pattern.test(UNIFIED_REMOTE_CONVERSATION_ASSET), true);
     assert.equal(hydrationDescriptor.pattern.test(OLD_APP_SERVER_MANAGER_ASSET), false);
     assert.equal(hydrationDescriptor.pattern.test("app-server-manager-signals-test.js"), false);
     assert.equal(hydrationDescriptor.pattern.test("remote-connections-settings-fixture.js"), false);
@@ -799,6 +801,7 @@ test("remote mobile control feature exposes opt-in main-bundle and webview patch
     assert.ok(loadGateDescriptor);
     assert.equal(loadGateDescriptor.pattern.test(CURRENT_REMOTE_CONVERSATION_ASSET), true);
     assert.equal(loadGateDescriptor.pattern.test(LATEST_REMOTE_CONVERSATION_ASSET), true);
+    assert.equal(loadGateDescriptor.pattern.test(UNIFIED_REMOTE_CONVERSATION_ASSET), true);
     assert.equal(loadGateDescriptor.pattern.test(OLD_REMOTE_CONTROL_GATE_ASSET), false);
     assert.equal(loadGateDescriptor.pattern.test("remote-connection-visibility-test.js"), false);
     assert.equal(loadGateDescriptor.pattern.test(LATEST_PROJECTLESS_REMOTE_TASK_ASSET), false);
@@ -812,6 +815,7 @@ test("remote mobile control feature exposes opt-in main-bundle and webview patch
     assert.equal(projectlessRemoteTaskDescriptor.pattern.test(OLD_REMOTE_CONTROL_GATE_ASSET), false);
     assert.equal(projectlessRemoteTaskDescriptor.pattern.test(CURRENT_REMOTE_CONVERSATION_ASSET), false);
     assert.equal(projectlessRemoteTaskDescriptor.pattern.test(LATEST_REMOTE_CONVERSATION_ASSET), false);
+    assert.equal(projectlessRemoteTaskDescriptor.pattern.test(UNIFIED_REMOTE_CONVERSATION_ASSET), false);
   });
 });
 
@@ -2147,7 +2151,7 @@ test("remote mobile feature patch report records feature metadata and partial wa
       fs.writeFileSync(path.join(tempApp, "package.json"), JSON.stringify({ name: "codex" }));
       fs.writeFileSync(path.join(assetsDir, "app-test.png"), "");
       fs.writeFileSync(
-        path.join(assetsDir, CURRENT_REMOTE_CONVERSATION_ASSET),
+        path.join(assetsDir, UNIFIED_REMOTE_CONVERSATION_ASSET),
         syntheticRemoteConnectionVisibilityBundle() +
           syntheticAppServerManagerSignalsBundle() +
           syntheticAppServerManagerStatusBundle(),
@@ -2480,10 +2484,11 @@ test("remote mobile control feature participates in ASAR patching and reports", 
         fs.writeFileSync(path.join(buildDir, "main.js"), source);
         fs.writeFileSync(path.join(buildDir, "workspace-root-drop-handler-test.js"), syntheticAppServerLaunchBundle());
         fs.writeFileSync(
-          path.join(assetsDir, CURRENT_REMOTE_CONVERSATION_ASSET),
+          path.join(assetsDir, UNIFIED_REMOTE_CONVERSATION_ASSET),
           syntheticRemoteConnectionVisibilityBundle() +
             syntheticAppServerManagerSignalsBundle() +
-            syntheticAppServerManagerStatusBundle(),
+            syntheticAppServerManagerStatusBundle() +
+            syntheticCurrentStatusWaitBundle(),
         );
         fs.writeFileSync(
           path.join(assetsDir, CURRENT_PROJECTLESS_REMOTE_TASK_ASSET),
@@ -2513,10 +2518,6 @@ test("remote mobile control feature participates in ASAR patching and reports", 
           syntheticAppServerManagerSignalsBundle(),
         );
         fs.writeFileSync(
-          path.join(assetsDir, REMOTE_CONTROL_STATUS_ASSET),
-          syntheticAppServerManagerStatusBundle() + syntheticCurrentStatusWaitBundle(),
-        );
-        fs.writeFileSync(
           path.join(assetsDir, "app-server-manager-signals-test.js"),
           syntheticAppServerManagerSignalsBundle(),
         );
@@ -2539,7 +2540,7 @@ test("remote mobile control feature participates in ASAR patching and reports", 
           "utf8",
         );
         const patchedRemoteConnectionVisibilityFile = fs.readFileSync(
-          path.join(assetsDir, CURRENT_REMOTE_CONVERSATION_ASSET),
+          path.join(assetsDir, UNIFIED_REMOTE_CONVERSATION_ASSET),
           "utf8",
         );
         const patchedAppMainFile = fs.readFileSync(
@@ -2559,11 +2560,11 @@ test("remote mobile control feature participates in ASAR patching and reports", 
           "utf8",
         );
         const patchedSignalsFile = fs.readFileSync(
-          path.join(assetsDir, CURRENT_REMOTE_CONVERSATION_ASSET),
+          path.join(assetsDir, UNIFIED_REMOTE_CONVERSATION_ASSET),
           "utf8",
         );
         const patchedStatusFile = fs.readFileSync(
-          path.join(assetsDir, REMOTE_CONTROL_STATUS_ASSET),
+          path.join(assetsDir, UNIFIED_REMOTE_CONVERSATION_ASSET),
           "utf8",
         );
         const patchedSidebarProjectGroupsFile = fs.readFileSync(

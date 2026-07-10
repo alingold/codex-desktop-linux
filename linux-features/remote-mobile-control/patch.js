@@ -56,7 +56,7 @@ const REMOTE_MOBILE_APP_SERVER_ARGS_NEEDLE =
   "[`-c`,`features.code_mode_host=true`,`app-server`,`--analytics-default-enabled`]";
 const REMOTE_MOBILE_PROJECTLESS_REMOTE_TASK_MARKER = "codexLinuxRemoteMobileProjectlessRemoteTaskId";
 const REMOTE_MOBILE_CONVERSATION_ASSET_PATTERN =
-  /^app-initial~app-main~(?:worktree-init-v2-page~remote-conversation-page~new-thread-panel-page~o~.*|new-thread-panel-page~appgen-library-page~hotkey-window-thread-page~ho~glxlkd48-.*)\.js$/u;
+  /^app-initial~app-main~(?:worktree-init-v2-page~remote-conversation-page~new-thread-panel-page~o~.*|new-thread-panel-page~appgen-library-page~hotkey-window-thread-page~ho~glxlkd48-.*|pull-request-code-review~onboarding-page~hotkey-window-thread-page~cha~b76hmflu-.*)\.js$/u;
 const REMOTE_MOBILE_PROJECTLESS_REMOTE_TASK_ASSET_PATTERN =
   /^app-initial~app-main~(?:worktree-init-v2-page~remote-conversation-page~pull-requests-page~plug~.*|new-thread-panel-page~appgen-library-page~hotkey-window-thread-page~ho~iufn7mg3-.*)\.js$/u;
 const REMOTE_CONTROL_SELECTED_TAB_NEEDLE =
