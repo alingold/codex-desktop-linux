@@ -1,8 +1,8 @@
 <h1 align="center">ChatGPT Desktop for Linux</h1>
 
 <p align="center">
-  <a href="https://github.com/ilysenko/codex-desktop-linux/actions/workflows/ci.yml"><img src="https://github.com/ilysenko/codex-desktop-linux/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/ilysenko/codex-desktop-linux/actions/workflows/upstream-build-app.yml"><img src="https://github.com/ilysenko/codex-desktop-linux/actions/workflows/upstream-build-app.yml/badge.svg" alt="Upstream Build App"></a>
+  <a href="https://github.com/alingold/codex-desktop-linux/actions/workflows/ci.yml"><img src="https://github.com/alingold/codex-desktop-linux/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/alingold/codex-desktop-linux/actions/workflows/upstream-build-app.yml"><img src="https://github.com/alingold/codex-desktop-linux/actions/workflows/upstream-build-app.yml/badge.svg" alt="Upstream Build App"></a>
 </p>
 
 Unofficial Linux build wrapper for [OpenAI ChatGPT Desktop](https://chatgpt.com/features/desktop/).
@@ -13,6 +13,14 @@ Electron app.
 The project builds native `.deb`, `.rpm`, and `.pkg.tar.zst` packages, supports
 local AppImage self-builds and Nix, and can install a local update manager that
 rebuilds future Linux packages from newer upstream DMGs.
+
+> [!IMPORTANT]
+> **This fork fixes and substantially improves Computer Use on Linux.** It adds
+> native, safety-checked mouse movement, clicking, scrolling, window-targeted
+> dragging and drawn paths, keyboard and Unicode input, clipboard restoration,
+> screenshots, accessibility targeting, and diagnostics across X11 plus major
+> Wayland compositors. The project remains an unofficial community port and is
+> not an OpenAI release.
 
 <p align="center">
   <a href="#how-to-install">Install</a> ·
@@ -38,7 +46,7 @@ and stay disabled unless you enable them before building.
 For native packages and AppImage self-builds, start from a checkout:
 
 ```bash
-git clone https://github.com/ilysenko/codex-desktop-linux.git
+git clone https://github.com/alingold/codex-desktop-linux.git
 cd codex-desktop-linux
 ```
 
@@ -48,7 +56,7 @@ cd codex-desktop-linux
 | Fedora | `make bootstrap-native` | Builds and installs an `.rpm` |
 | openSUSE | `make bootstrap-native` | Builds and installs an `.rpm` |
 | Arch, Manjaro, EndeavourOS | `make bootstrap-native` | Builds and installs a pacman package |
-| NixOS / Nix | `nix run github:ilysenko/codex-desktop-linux` | See [Nix docs](docs/nix.md) |
+| NixOS / Nix | `nix run github:alingold/codex-desktop-linux` | See [Nix docs](docs/nix.md) |
 | Atomic desktops / other distros | `make build-app && make appimage` | Local self-build; no bundled updater |
 
 Recommended native install:
@@ -123,7 +131,7 @@ checkout with:
 rm -rf codex-app
 ```
 
-`nix run github:ilysenko/codex-desktop-linux` is ephemeral. If you installed
+`nix run github:alingold/codex-desktop-linux` is ephemeral. If you installed
 the flake through a Nix profile, Home Manager, or a NixOS module, remove that
 profile or configuration entry and rebuild your profile/system.
 
@@ -182,7 +190,7 @@ workarounds.
 | Native packages | Always | `make package && make install` | [Build and packaging](docs/build-and-packaging.md) |
 | Auto-update manager | Native packages | Included unless `PACKAGE_WITH_UPDATER=0` | [Updater](docs/updater.md) |
 | AppImage self-build | Manual | `make build-app && make appimage` | [Build and packaging](docs/build-and-packaging.md#appimage-local-self-build) |
-| Nix flake | Manual | `nix run github:ilysenko/codex-desktop-linux` | [Nix](docs/nix.md) |
+| Nix flake | Manual | `nix run github:alingold/codex-desktop-linux` | [Nix](docs/nix.md) |
 | GUI install prompts | If installed | Uses `kdialog` / `zenity`, then terminal fallback | [Native setup](docs/native-setup.md) |
 | Linux file manager integration | Always | Built into core Linux patches | [Architecture](docs/architecture.md) |
 | Chrome plugin native host | Always | Installed with bundled plugins | [Architecture](docs/architecture.md) |

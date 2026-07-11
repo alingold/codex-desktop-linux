@@ -5325,6 +5325,9 @@ EOF
     assert_contains "$REPO_DIR/.github/workflows/ci.yml" "tests/fixtures/create-packaged-app-fixture.sh codex-app"
     assert_contains "$REPO_DIR/.github/workflows/ci.yml" "bash scripts/ci/run-node-checks.sh"
     assert_contains "$REPO_DIR/.github/workflows/ci.yml" "shell: /bin/sh -e {0}"
+    assert_contains "$REPO_DIR/.github/workflows/ci.yml" '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+    assert_contains "$REPO_DIR/README.md" "This fork fixes and substantially improves Computer Use on Linux"
+    assert_contains "$REPO_DIR/README.md" "github.com/alingold/codex-desktop-linux.git"
     assert_contains "$REPO_DIR/.github/workflows/upstream-sync.yml" "cron: '17 14 \* \* 1'"
     assert_contains "$REPO_DIR/.github/workflows/upstream-sync.yml" "git merge --no-ff --no-edit"
     assert_contains "$REPO_DIR/.github/workflows/upstream-sync.yml" "git push --force-with-lease"

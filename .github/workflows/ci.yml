@@ -78,6 +78,7 @@ jobs:
       - name: Check and test Computer Use
         shell: /bin/sh -e {0}
         run: |
+          export PATH="$HOME/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
           "$HOME/.cargo/bin/cargo" check -p codex-computer-use-linux --all-targets
           "$HOME/.cargo/bin/cargo" test -p codex-computer-use-linux --lib
 

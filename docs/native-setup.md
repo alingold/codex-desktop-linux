@@ -8,7 +8,7 @@ This project has two native install entrypoints:
 ## Fast Native Install
 
 ```bash
-git clone https://github.com/ilysenko/codex-desktop-linux.git
+git clone https://github.com/alingold/codex-desktop-linux.git
 cd codex-desktop-linux
 make bootstrap-native
 ```
