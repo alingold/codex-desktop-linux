@@ -342,6 +342,7 @@ Full list: [Troubleshooting](docs/troubleshooting.md).
 - [Linux Computer Use](docs/linux-computer-use.md)
 - [Record and Replay on Linux](docs/record-and-replay-linux.md)
 - [Updater](docs/updater.md)
+- [Maintaining a published fork](docs/upstream-maintenance.md)
 - [Build and packaging](docs/build-and-packaging.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Architecture](docs/architecture.md)

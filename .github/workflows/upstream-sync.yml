@@ -1,0 +1,206 @@
+name: Weekly upstream sync
+
+on:
+  schedule:
+    - cron: '17 14 * * 1'
+  workflow_dispatch: {}
+
+permissions:
+  actions: write
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: weekly-upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPOSITORY: ilysenko/codex-desktop-linux
+  UPSTREAM_BRANCH: main
+  BASE_BRANCH: main
+  SYNC_BRANCH: automation/upstream-sync
+  CONFLICT_ISSUE_TITLE: Weekly upstream sync needs conflict resolution
+
+jobs:
+  prepare-sync:
+    name: Prepare reviewed upstream update
+    if: github.repository != 'ilysenko/codex-desktop-linux'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ env.BASE_BRANCH }}
+
+      - name: Merge current upstream into an automation branch
+        id: sync
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "codex-upstream-sync-bot"
+          git config user.email "actions@github.com"
+          git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+          git fetch --no-tags upstream \
+            "+refs/heads/${UPSTREAM_BRANCH}:refs/remotes/upstream/${UPSTREAM_BRANCH}"
+          git fetch --no-tags origin \
+            "+refs/heads/${BASE_BRANCH}:refs/remotes/origin/${BASE_BRANCH}"
+          git fetch --no-tags origin \
+            "+refs/heads/${SYNC_BRANCH}:refs/remotes/origin/${SYNC_BRANCH}" || true
+
+          base_ref="refs/remotes/origin/${BASE_BRANCH}"
+          upstream_ref="refs/remotes/upstream/${UPSTREAM_BRANCH}"
+          sync_ref="refs/remotes/origin/${SYNC_BRANCH}"
+
+          if git merge-base --is-ancestor "$upstream_ref" "$base_ref"; then
+            echo "result=up-to-date" >> "$GITHUB_OUTPUT"
+            echo "Base already contains the current upstream branch." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          if git show-ref --verify --quiet "$sync_ref" \
+            && git merge-base --is-ancestor "$base_ref" "$sync_ref" \
+            && git merge-base --is-ancestor "$upstream_ref" "$sync_ref"; then
+            echo "result=pending-review" >> "$GITHUB_OUTPUT"
+            echo "The existing sync pull request already covers the current base and upstream heads." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          git checkout -B "$SYNC_BRANCH" "$base_ref"
+          if ! git merge --no-ff --no-edit "$upstream_ref"; then
+            conflict_file="$RUNNER_TEMP/upstream-sync-conflicts.txt"
+            git diff --name-only --diff-filter=U > "$conflict_file"
+            git merge --abort
+            echo "result=conflict" >> "$GITHUB_OUTPUT"
+            echo "conflict_file=$conflict_file" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git push --force-with-lease origin "HEAD:refs/heads/${SYNC_BRANCH}"
+          echo "result=updated" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Open or update conflict issue
+        if: steps.sync.outputs.result == 'conflict'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONFLICT_FILE: ${{ steps.sync.outputs.conflict_file }}
+        run: |
+          set -euo pipefail
+
+          body_file="$RUNNER_TEMP/upstream-sync-conflict.md"
+          {
+            echo "The scheduled merge of \`${UPSTREAM_REPOSITORY}:${UPSTREAM_BRANCH}\` into \`${BASE_BRANCH}\` has conflicts."
+            echo
+            echo "Conflicting paths:"
+            echo '```text'
+            cat "$CONFLICT_FILE"
+            echo '```'
+            echo
+            echo "Resolve this in a trusted local checkout; automation did not push a partial merge."
+            echo
+            echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          } > "$body_file"
+
+          issue_number="$(gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --json number,title \
+            --jq ".[] | select(.title == \"${CONFLICT_ISSUE_TITLE}\") | .number" \
+            | head -n 1)"
+          if [ -n "$issue_number" ]; then
+            gh issue edit "$issue_number" --repo "$GITHUB_REPOSITORY" --body-file "$body_file"
+          else
+            gh issue create \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$CONFLICT_ISSUE_TITLE" \
+              --body-file "$body_file"
+          fi
+
+          cat "$body_file" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail visibly after reporting conflicts
+        if: steps.sync.outputs.result == 'conflict'
+        run: exit 1
+
+      - name: Open or update the review pull request
+        if: steps.sync.outputs.result == 'updated'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ steps.sync.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+
+          body_file="$RUNNER_TEMP/upstream-sync-pr.md"
+          cat > "$body_file" <<EOF
+          ## Summary
+
+          - merge the current \`${UPSTREAM_REPOSITORY}:${UPSTREAM_BRANCH}\` into this fork
+          - preserve the fork's Linux Computer Use integration and packaging changes
+          - require human review before merging
+
+          ## Automated validation
+
+          This workflow dispatches both the full CI matrix and the current-DMG build against \`${HEAD_SHA}\`.
+          The pull request is never merged automatically.
+
+          ## Review focus
+
+          - Computer Use input, targeting, clipboard, and screenshot behavior
+          - launcher and bundled webview compatibility
+          - updater and native package payloads
+          - required and optional upstream patch drift
+          EOF
+
+          pr_url="$(gh pr list \
+            --repo "$GITHUB_REPOSITORY" \
+            --base "$BASE_BRANCH" \
+            --head "$SYNC_BRANCH" \
+            --state open \
+            --json url \
+            --jq '.[0].url // ""')"
+          if [ -z "$pr_url" ]; then
+            pr_url="$(gh pr create \
+              --repo "$GITHUB_REPOSITORY" \
+              --base "$BASE_BRANCH" \
+              --head "$SYNC_BRANCH" \
+              --title "chore: sync current Linux upstream" \
+              --body-file "$body_file")"
+          else
+            gh pr edit "$pr_url" \
+              --title "chore: sync current Linux upstream" \
+              --body-file "$body_file"
+          fi
+
+          echo "Opened or updated upstream sync PR: $pr_url" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Dispatch validation for the generated branch
+        if: steps.sync.outputs.result == 'updated'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$SYNC_BRANCH"
+          gh workflow run upstream-build-app.yml --repo "$GITHUB_REPOSITORY" --ref "$SYNC_BRANCH"
+
+      - name: Close a resolved conflict issue
+        if: steps.sync.outputs.result == 'updated'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --json number,title \
+            --jq ".[] | select(.title == \"${CONFLICT_ISSUE_TITLE}\") | .number" \
+            | while read -r issue_number; do
+                [ -n "$issue_number" ] || continue
+                gh issue close "$issue_number" \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --comment "The automation branch now merges cleanly; closing this conflict report."
+              done
