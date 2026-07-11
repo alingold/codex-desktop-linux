@@ -15,6 +15,8 @@ It supports:
 - continuous multi-point drawing gestures for handwriting, curves, and lassos
 - exact X11 window activation plus EWMH move/resize control on Cinnamon, MATE,
   XFCE, and compatible window managers
+- application-focused X11 discovery that omits desktop, dock, notification,
+  splash, and taskbar/pager-hidden utility surfaces
 
 ## Runtime Dependencies
 

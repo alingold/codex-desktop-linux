@@ -57,13 +57,38 @@ pub fn list_windows() -> Result<Vec<WindowInfo>> {
         .and_then(|property| cardinal_property(&connection, root, property).ok());
     let hidden_atom = atom(&connection, "_NET_WM_STATE_HIDDEN").ok();
     let state_atom = atom(&connection, "_NET_WM_STATE").ok();
+    let skip_taskbar_atom = atom(&connection, "_NET_WM_STATE_SKIP_TASKBAR").ok();
+    let skip_pager_atom = atom(&connection, "_NET_WM_STATE_SKIP_PAGER").ok();
     let pid_atom = atom(&connection, "_NET_WM_PID").ok();
+    let client_leader_atom = atom(&connection, "WM_CLIENT_LEADER").ok();
     let desktop_atom = atom(&connection, "_NET_WM_DESKTOP").ok();
     let name_atom = atom(&connection, "_NET_WM_NAME").ok();
     let utf8_atom = atom(&connection, "UTF8_STRING").ok();
+    let window_type_atom = atom(&connection, "_NET_WM_WINDOW_TYPE").ok();
+    let excluded_window_types = [
+        "_NET_WM_WINDOW_TYPE_DESKTOP",
+        "_NET_WM_WINDOW_TYPE_DOCK",
+        "_NET_WM_WINDOW_TYPE_NOTIFICATION",
+        "_NET_WM_WINDOW_TYPE_SPLASH",
+    ]
+    .into_iter()
+    .filter_map(|name| atom(&connection, name).ok())
+    .collect::<Vec<_>>();
 
     let mut windows = Vec::new();
     for window in clients {
+        let window_types = window_type_atom
+            .and_then(|property| atom_property(&connection, window, property).ok())
+            .unwrap_or_default();
+        if is_excluded_window_type(&window_types, &excluded_window_types) {
+            continue;
+        }
+        let states = state_atom
+            .and_then(|property| atom_property(&connection, window, property).ok())
+            .unwrap_or_default();
+        if is_non_application_state(&states, skip_taskbar_atom, skip_pager_atom) {
+            continue;
+        }
         let geometry = match connection.get_geometry(window)?.reply() {
             Ok(value) if value.width > 0 && value.height > 0 => value,
             _ => continue,
@@ -91,9 +116,6 @@ pub fn list_windows() -> Result<Vec<WindowInfo>> {
         let workspace = desktop_atom
             .and_then(|property| cardinal_property(&connection, window, property).ok())
             .and_then(|value| (value != u32::MAX).then_some(value as i32));
-        let states = state_atom
-            .and_then(|property| atom_property(&connection, window, property).ok())
-            .unwrap_or_default();
         let hidden = hidden_atom.is_some_and(|hidden| states.contains(&hidden));
         let focused = active == Some(window);
         let visible_workspace = workspace
@@ -105,8 +127,9 @@ pub fn list_windows() -> Result<Vec<WindowInfo>> {
             title,
             app_id: clean(instance),
             wm_class: clean(class),
-            pid: pid_atom
-                .and_then(|property| cardinal_property(&connection, window, property).ok()),
+            pid: pid_atom.and_then(|property| {
+                pid_for_window(&connection, window, property, client_leader_atom)
+            }),
             bounds: Some(WindowBounds {
                 x: translated.as_ref().map(|value| i32::from(value.dst_x)),
                 y: translated.as_ref().map(|value| i32::from(value.dst_y)),
@@ -307,6 +330,38 @@ fn wm_class(connection: &RustConnection, window: Window) -> Result<(String, Stri
     parse_wm_class(&reply.value).context("WM_CLASS was empty")
 }
 
+fn pid_for_window(
+    connection: &RustConnection,
+    window: Window,
+    pid_atom: Atom,
+    client_leader_atom: Option<Atom>,
+) -> Option<u32> {
+    cardinal_property(connection, window, pid_atom)
+        .ok()
+        .or_else(|| {
+            let leader = window_property(connection, window, client_leader_atom?)
+                .ok()?
+                .first()
+                .copied()?;
+            cardinal_property(connection, leader, pid_atom).ok()
+        })
+}
+
+fn is_excluded_window_type(window_types: &[Atom], excluded_types: &[Atom]) -> bool {
+    window_types
+        .iter()
+        .any(|window_type| excluded_types.contains(window_type))
+}
+
+fn is_non_application_state(
+    states: &[Atom],
+    skip_taskbar_atom: Option<Atom>,
+    skip_pager_atom: Option<Atom>,
+) -> bool {
+    skip_taskbar_atom.is_some_and(|atom| states.contains(&atom))
+        && skip_pager_atom.is_some_and(|atom| states.contains(&atom))
+}
+
 pub(crate) fn parse_wm_class(value: &[u8]) -> Option<(String, String)> {
     let mut fields = value
         .split(|byte| *byte == 0)
@@ -332,5 +387,19 @@ mod tests {
             parse_wm_class(b"libreoffice\0LibreOffice\0"),
             Some(("libreoffice".to_string(), "LibreOffice".to_string()))
         );
+    }
+
+    #[test]
+    fn excludes_non_application_window_types() {
+        assert!(is_excluded_window_type(&[10, 20], &[20, 30]));
+        assert!(!is_excluded_window_type(&[10, 20], &[30, 40]));
+        assert!(!is_excluded_window_type(&[], &[30, 40]));
+    }
+
+    #[test]
+    fn excludes_windows_hidden_from_both_taskbar_and_pager() {
+        assert!(is_non_application_state(&[10, 20, 30], Some(10), Some(20)));
+        assert!(!is_non_application_state(&[10, 30], Some(10), Some(20)));
+        assert!(!is_non_application_state(&[10, 20], None, Some(20)));
     }
 }
