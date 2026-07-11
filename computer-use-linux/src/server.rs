@@ -6,10 +6,10 @@ use crate::atspi_tree::{
 use crate::diagnostics::{doctor_report, setup_accessibility_report, DoctorReport, SetupReport};
 use crate::gnome_extension::{setup_window_targeting_report, WindowTargetingSetupReport};
 use crate::remote_desktop::{
-    click as portal_click, drag as portal_drag, keysyms_for_text, press_keycode_chord,
-    scroll as portal_scroll, start_portal_keyboard_session, start_portal_pointer_session,
-    type_text_with_keysyms, PointerButton, PortalKeyboardSession, PortalPointerSession,
-    ScrollDirection,
+    click as portal_click, drag as portal_drag, draw_path as portal_draw_path, keysyms_for_text,
+    press_keycode_chord, scroll as portal_scroll, start_portal_keyboard_session,
+    start_portal_pointer_session, type_text_with_keysyms, PointerButton, PortalKeyboardSession,
+    PortalPointerSession, ScrollDirection,
 };
 use crate::screenshot::{
     capture_screenshot_raw, prepare_screenshot_payload, RawScreenshotCapture, ScreenshotCapture,
@@ -1094,6 +1094,112 @@ impl ComputerUseLinux {
     }
 
     #[tool(
+        name = "draw_path",
+        description = "Draw or drag along a continuous path. Holds the selected mouse button while visiting every pixel coordinate in order, then releases it. Use this instead of repeated drag calls for handwriting, signatures, freeform drawing, lassos, and curves. Provide 2-512 points; point_delay_ms defaults to 12ms.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn draw_path(
+        &self,
+        Parameters(params): Parameters<DrawPathParams>,
+    ) -> Json<ActionOutput> {
+        let received = Some(serde_json::json!(params));
+        if !(2..=512).contains(&params.points.len()) {
+            return Json(ActionOutput {
+                ok: false,
+                implemented: true,
+                action: "draw_path".to_string(),
+                message: "draw_path requires between 2 and 512 points".to_string(),
+                received,
+            });
+        }
+        let points = params
+            .points
+            .iter()
+            .map(|point| (point.x, point.y))
+            .collect::<Vec<_>>();
+        let delay = Duration::from_millis(u64::from(params.point_delay_ms.clamp(1, 100)));
+        let abs_button = crate::abs_pointer::PointerButton::from_name(params.button.as_deref());
+        let portal_button = PointerButton::from_name(params.button.as_deref());
+
+        if self.ensure_abs_pointer().await {
+            let abs_pointer = Arc::clone(&self.abs_pointer);
+            let abs_points = points.clone();
+            let drawn = tokio::task::spawn_blocking(move || {
+                let mut guard = abs_pointer.lock().ok()?;
+                Some(
+                    guard
+                        .as_mut()?
+                        .drag_path(&abs_points, abs_button, delay)
+                        .is_ok(),
+                )
+            })
+            .await
+            .ok()
+            .flatten();
+            if drawn == Some(true) {
+                return Json(ActionOutput {
+                    ok: true,
+                    implemented: true,
+                    action: "draw_path".to_string(),
+                    message: "Continuous path sent through the uinput absolute pointer."
+                        .to_string(),
+                    received,
+                });
+            }
+        }
+
+        if let Some(session) = self.cached_portal_pointer_session() {
+            match portal_draw_path(&session, &points, portal_button, delay).await {
+                Ok(()) => {
+                    return Json(ActionOutput {
+                        ok: true,
+                        implemented: true,
+                        action: "draw_path".to_string(),
+                        message: "Continuous path sent through the remote desktop portal."
+                            .to_string(),
+                        received,
+                    });
+                }
+                Err(_) => self.clear_portal_pointer_session(),
+            }
+        } else if self.should_prefer_portal_pointer_backend() {
+            if let Ok(Some(session)) = self.ensure_portal_pointer_session().await {
+                match portal_draw_path(&session, &points, portal_button, delay).await {
+                    Ok(()) => {
+                        return Json(ActionOutput {
+                            ok: true,
+                            implemented: true,
+                            action: "draw_path".to_string(),
+                            message: "Continuous path sent through the remote desktop portal."
+                                .to_string(),
+                            received,
+                        });
+                    }
+                    Err(_) => self.clear_portal_pointer_session(),
+                }
+            }
+        }
+
+        let mut sequence = Vec::with_capacity(params.points.len() + 2);
+        sequence.push(absolute_mousemove_args(
+            params.points[0].x,
+            params.points[0].y,
+        ));
+        sequence.push(vec!["click".to_string(), "0x40".to_string()]);
+        for point in &params.points[1..] {
+            sequence.push(absolute_mousemove_args(point.x, point.y));
+        }
+        sequence.push(vec!["click".to_string(), "0x80".to_string()]);
+        let result = run_ydotool_sequence(&sequence).await;
+        Json(action_result("draw_path", result, received))
+    }
+
+    #[tool(
         name = "press_key",
         description = "Press a key or key-combination on the keyboard, optionally after focusing a target window or terminal selector. Key grammar (case-insensitive; hyphens/spaces ignored): combos join with '+', e.g. Ctrl+L or Ctrl+Shift+T. Modifiers: ctrl/control, alt/option, shift, meta/super/cmd/command. Named keys: enter/return, escape/esc, tab, backspace, delete/del, space, home, end, pageup, pagedown, arrowleft/left, arrowright/right, arrowup/up, arrowdown/down, f1-f12. Plus single US letters a-z and digits 0-9. Anything else returns an error (never silently dropped). Note: compositor-level shortcuts (e.g. Super+Up) may be consumed by GNOME before reaching the app.",
         annotations(
@@ -1803,6 +1909,25 @@ struct DragParams {
     start_y: i32,
     end_x: i32,
     end_y: i32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+struct PointerPathPoint {
+    x: i32,
+    y: i32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+struct DrawPathParams {
+    points: Vec<PointerPathPoint>,
+    #[serde(default = "default_path_point_delay_ms")]
+    point_delay_ms: u16,
+    #[serde(default)]
+    button: Option<String>,
+}
+
+fn default_path_point_delay_ms() -> u16 {
+    12
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]

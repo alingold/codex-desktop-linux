@@ -8,9 +8,11 @@ It supports:
 
 - app listing and accessibility trees through AT-SPI
 - screenshots through GNOME Shell DBus, the Codex GNOME Shell extension, or XDG Desktop Portal
-- window listing and focusing on GNOME, KWin/Plasma, Hyprland, COSMIC, and i3
+- window listing and focusing on GNOME, KWin/Plasma, Hyprland, COSMIC, i3,
+  and EWMH-compliant X11 desktops including Cinnamon, MATE, and XFCE
 - keyboard, text, click, scroll, and drag input through `/dev/uinput`, XDG
   RemoteDesktop portal, or `ydotool`
+- continuous multi-point drawing gestures for handwriting, curves, and lassos
 
 ## Runtime Dependencies
 

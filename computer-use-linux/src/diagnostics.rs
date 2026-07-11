@@ -1,6 +1,6 @@
 use crate::windowing::registry::{
     self, COSMIC_WAYLAND_BACKEND, GNOME_SHELL_EXTENSION_BACKEND, GNOME_SHELL_INTROSPECT_BACKEND,
-    HYPRLAND_BACKEND, KWIN_BACKEND,
+    HYPRLAND_BACKEND, KWIN_BACKEND, X11_EWMH_BACKEND,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -243,6 +243,15 @@ fn capability_map(
     }
     if windowing.cosmic_helper.ok {
         window_backends.push("cosmic".to_string());
+    }
+    for backend in [crate::windowing::I3_BACKEND, X11_EWMH_BACKEND] {
+        if windowing
+            .backends
+            .get(backend)
+            .is_some_and(|check| check.ok)
+        {
+            window_backends.push(backend.to_string());
+        }
     }
 
     let mut accessibility_backends = Vec::new();
@@ -579,6 +588,7 @@ fn windowing_report(platform: &PlatformReport) -> WindowingReport {
     let cosmic_helper = backend_check(COSMIC_WAYLAND_BACKEND);
     let kwin = backend_check(KWIN_BACKEND);
     let hyprland = backend_check(HYPRLAND_BACKEND);
+    let x11 = backend_check(X11_EWMH_BACKEND);
     let backends = probes
         .iter()
         .map(|probe| (probe.id.to_string(), check_from_backend_probe(probe)))
@@ -593,6 +603,8 @@ fn windowing_report(platform: &PlatformReport) -> WindowingReport {
             "A KWin/Plasma window backend is available for list_windows, focused_window, and targeted input verification."
         } else if hyprland.ok {
             "A Hyprland window backend is available for list_windows, focused_window, and targeted input verification."
+        } else if x11.ok {
+            "An EWMH X11 window backend is available for list_windows, focused_window, and targeted input verification."
         } else {
             "A GNOME window listing backend is available for list_windows, focused_window, and targeted input verification."
         }

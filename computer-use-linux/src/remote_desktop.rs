@@ -227,6 +227,41 @@ pub async fn drag(
     .await
 }
 
+pub async fn draw_path(
+    session: &PortalPointerSession,
+    points: &[(i32, i32)],
+    button: PointerButton,
+    point_delay: Duration,
+) -> Result<()> {
+    let Some(&(first_x, first_y)) = points.first() else {
+        return Ok(());
+    };
+    let proxy = remote_desktop_proxy(&session.connection).await?;
+    let (stream_id, first_x, first_y) = session.map_absolute_point(first_x, first_y)?;
+    notify_pointer_motion_absolute(&proxy, &session.session_handle, stream_id, first_x, first_y)
+        .await?;
+    notify_pointer_button(
+        &proxy,
+        &session.session_handle,
+        button.evdev_code(),
+        POINTER_BUTTON_PRESSED,
+    )
+    .await?;
+    tokio::time::sleep(point_delay).await;
+    for &(x, y) in &points[1..] {
+        let (stream_id, x, y) = session.map_absolute_point(x, y)?;
+        notify_pointer_motion_absolute(&proxy, &session.session_handle, stream_id, x, y).await?;
+        tokio::time::sleep(point_delay).await;
+    }
+    notify_pointer_button(
+        &proxy,
+        &session.session_handle,
+        button.evdev_code(),
+        POINTER_BUTTON_RELEASED,
+    )
+    .await
+}
+
 pub async fn type_text_with_keysyms(
     session: &PortalKeyboardSession,
     keysyms: &[i32],
