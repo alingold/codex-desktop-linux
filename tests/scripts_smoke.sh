@@ -3119,6 +3119,49 @@ test_setup_native_wizard_sway_hint_is_conservative() {
     assert_not_contains "$output_log" "Sway -> i3 IPC backend through swaymsg"
 }
 
+test_setup_native_wizard_recommends_hyprland_portal() {
+    info "Checking setup-native wizard recommends Hyprland's portal backend"
+    local workspace="$TMP_DIR/setup-native-hyprland-portal"
+    local features_root="$workspace/linux-features"
+    local config="$workspace/features.json"
+    local output_log="$workspace/output.log"
+
+    make_wizard_feature_root "$features_root"
+    printf '%s\n' '{"enabled":[]}' > "$config"
+
+    XDG_CURRENT_DESKTOP=Hyprland \
+    DESKTOP_SESSION=hyprland \
+    XDG_SESSION_DESKTOP=Hyprland \
+    XDG_SESSION_TYPE=wayland \
+    CODEX_BOOTSTRAP_NONINTERACTIVE=1 \
+    CODEX_LINUX_FEATURES_ROOT="$features_root" \
+    CODEX_LINUX_FEATURES_CONFIG="$config" \
+        bash "$REPO_DIR/scripts/bootstrap-wizard.sh" >"$output_log"
+
+    assert_contains "$output_log" "xdg-desktop-portal-hyprland"
+    assert_not_contains "$output_log" "xdg-desktop-portal-wlr"
+}
+
+test_computer_use_optional_runtime_packaging() {
+    info "Checking Computer Use optional runtime packaging and Nix version parity"
+    local cargo_version
+    local nix_version
+
+    cargo_version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' "$REPO_DIR/computer-use-linux/Cargo.toml" | head -n 1)"
+    nix_version="$(sed -n '/pname = "codex-computer-use-linux-binaries";/,/src = computerUseBuildSource;/s/^[[:space:]]*version = "\([^"]*\)";$/\1/p' "$REPO_DIR/flake.nix")"
+    [ -n "$cargo_version" ] || fail "Could not read Computer Use Cargo version"
+    [ "$nix_version" = "$cargo_version" ] \
+        || fail "Expected Nix Computer Use version $cargo_version, got ${nix_version:-missing}"
+
+    assert_contains "$REPO_DIR/packaging/linux/control" "Recommends:.*xdotool"
+    assert_not_contains "$REPO_DIR/packaging/linux/control" "Depends:.*xdotool"
+    assert_contains "$REPO_DIR/packaging/linux/codex-desktop.spec" "Recommends:.*xdotool"
+    assert_not_contains "$REPO_DIR/packaging/linux/codex-desktop.spec" "Requires:.*xdotool"
+    assert_contains "$REPO_DIR/packaging/linux/PKGBUILD.template" "xdotool: full-Unicode Computer Use text entry on X11"
+    assert_contains "$REPO_DIR/flake.nix" "optionals enableComputerUseUi \[ pkgs.xdotool \]"
+    assert_contains "$REPO_DIR/flake.nix" 'launcherPath enableComputerUseUi'
+}
+
 test_setup_native_wizard_cleanup_requires_interactive_confirmation() {
     info "Checking setup-native wizard cleanup refuses non-interactive deletion"
     local workspace="$TMP_DIR/setup-native-cleanup-noninteractive"
@@ -8615,6 +8658,8 @@ main() {
     test_setup_native_wizard_uinput_stat_is_bounded
     test_setup_native_wizard_read_aloud_paths_match_runtime_defaults
     test_setup_native_wizard_sway_hint_is_conservative
+    test_setup_native_wizard_recommends_hyprland_portal
+    test_computer_use_optional_runtime_packaging
     test_setup_native_wizard_cleanup_requires_interactive_confirmation
     test_setup_native_wizard_dry_run_cleanup_allows_noninteractive_preview
     test_setup_native_wizard_blank_interactive_cleanup_ids_skip_cleanup

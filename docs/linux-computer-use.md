@@ -51,6 +51,10 @@ sudo pacman -S xdotool
 sudo zypper install xdotool
 ```
 
+The deb and RPM packages recommend `xdotool`, and the Arch package lists it as
+an optional dependency. Nix Computer Use UI outputs place `xdotool` on the app
+launcher `PATH`; the base Nix output does not add it.
+
 If `xdotool` is absent, X11 text entry falls back safely to the regular
 keyboard backend before changing the clipboard. Install `ydotool` when you
 need that global fallback input path for keyboard and pointer actions:

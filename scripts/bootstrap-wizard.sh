@@ -295,7 +295,9 @@ computer_use_portal_packages() {
     desktop="${desktop,,}"
     if [[ "$desktop" == *kde* || "$desktop" == *plasma* ]]; then
         printf 'xdg-desktop-portal xdg-desktop-portal-kde'
-    elif [[ "$desktop" == *hyprland* || "$desktop" == *sway* || "$desktop" == *wlroots* ]]; then
+    elif [[ "$desktop" == *hyprland* ]]; then
+        printf 'xdg-desktop-portal xdg-desktop-portal-hyprland'
+    elif [[ "$desktop" == *sway* || "$desktop" == *wlroots* ]]; then
         printf 'xdg-desktop-portal xdg-desktop-portal-wlr'
     elif [[ "$desktop" == *gnome* ]]; then
         printf 'xdg-desktop-portal xdg-desktop-portal-gnome'

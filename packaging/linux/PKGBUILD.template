@@ -43,6 +43,7 @@ optdepends=(
     'npm: optional override for Codex CLI install/update flows'
     'zenity: GTK dialog fallback when the Codex CLI is missing'
     'kdialog: KDE dialog fallback when the Codex CLI is missing'
+    'xdotool: full-Unicode Computer Use text entry on X11'
 )
 options=(!debug !strip)
 install=__PACKAGE_NAME__.install
