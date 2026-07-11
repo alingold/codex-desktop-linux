@@ -197,6 +197,9 @@ pub async fn activate_window(window: &WindowInfo) -> Result<()> {
 pub async fn move_window(window: &WindowInfo, x: i32, y: i32) -> Result<String> {
     match window.backend.as_str() {
         GNOME_SHELL_EXTENSION_BACKEND => gnome::move_extension_window(window.window_id, x, y).await,
+        KWIN_BACKEND => kwin::move_window(window.window_id, x, y).await,
+        HYPRLAND_BACKEND => hyprland::move_window(window.window_id, x, y),
+        I3_BACKEND => i3::move_window(window.window_id, x, y),
         X11_EWMH_BACKEND => x11::move_window(window.window_id, x, y),
         backend => Err(anyhow!("Window move is unsupported by backend {backend}")),
     }
@@ -207,6 +210,9 @@ pub async fn resize_window(window: &WindowInfo, width: i32, height: i32) -> Resu
         GNOME_SHELL_EXTENSION_BACKEND => {
             gnome::resize_extension_window(window.window_id, width, height).await
         }
+        KWIN_BACKEND => kwin::resize_window(window.window_id, width, height).await,
+        HYPRLAND_BACKEND => hyprland::resize_window(window.window_id, width, height),
+        I3_BACKEND => i3::resize_window(window.window_id, width, height),
         X11_EWMH_BACKEND => x11::resize_window(window.window_id, width, height),
         backend => Err(anyhow!("Window resize is unsupported by backend {backend}")),
     }

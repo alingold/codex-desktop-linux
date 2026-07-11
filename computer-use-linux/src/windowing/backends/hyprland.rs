@@ -68,6 +68,12 @@ pub fn list_windows() -> Result<Vec<WindowInfo>> {
 }
 
 pub(crate) fn parse_hyprland_clients(json: &str) -> Result<Vec<WindowInfo>> {
+    let mut windows = parse_hyprland_client_windows(json)?;
+    enrich_terminal_windows(&mut windows);
+    Ok(windows)
+}
+
+fn parse_hyprland_client_windows(json: &str) -> Result<Vec<WindowInfo>> {
     let clients: Vec<HyprlandClient> =
         serde_json::from_str(json).context("failed to parse hyprctl clients -j output")?;
 
@@ -77,22 +83,112 @@ pub(crate) fn parse_hyprland_clients(json: &str) -> Result<Vec<WindowInfo>> {
         .map(WindowInfo::try_from)
         .collect::<Result<Vec<_>>>()?;
     windows.sort_by_key(|window| window.window_id);
-    enrich_terminal_windows(&mut windows);
     Ok(windows)
 }
 
 pub fn activate_window(window_id: u64) -> Result<()> {
     let address = format!("address:0x{window_id:x}");
-    let output = hyprctl_output(&["dispatch", "focuswindow", &address])
-        .with_context(|| format!("failed to run hyprctl dispatch focuswindow {address}"))?;
-    if output.status.success() {
+    run_hyprland_dispatch("focuswindow", &address)
+}
+
+pub fn move_window(window_id: u64, x: i32, y: i32) -> Result<String> {
+    let address = format!("address:0x{window_id:x}");
+    let parameters = format!("exact {x} {y},{address}");
+    run_hyprland_dispatch("movewindowpixel", &parameters)?;
+
+    let bounds = query_hyprland_window_bounds(window_id)?;
+    if bounds.x != Some(x) || bounds.y != Some(y) {
+        bail!(
+            "Hyprland accepted the move request for window {window_id}, but reported position ({}, {}) instead of ({x}, {y}); the window may be tiled or constrained by the active layout",
+            optional_coordinate(bounds.x),
+            optional_coordinate(bounds.y),
+        );
+    }
+
+    Ok(format!("Moved Hyprland window {window_id} to ({x}, {y})."))
+}
+
+pub fn resize_window(window_id: u64, width: i32, height: i32) -> Result<String> {
+    if width < 1 || height < 1 {
+        bail!("window width and height must both be positive");
+    }
+
+    let address = format!("address:0x{window_id:x}");
+    let parameters = format!("exact {width} {height},{address}");
+    run_hyprland_dispatch("resizewindowpixel", &parameters)?;
+
+    let bounds = query_hyprland_window_bounds(window_id)?;
+    if bounds.width != width as u32 || bounds.height != height as u32 {
+        bail!(
+            "Hyprland accepted the resize request for window {window_id}, but reported {}x{} instead of {width}x{height}; the window may be tiled or constrained by the active layout",
+            bounds.width,
+            bounds.height,
+        );
+    }
+
+    Ok(format!(
+        "Resized Hyprland window {window_id} to {width}x{height}."
+    ))
+}
+
+fn run_hyprland_dispatch(dispatcher: &str, parameters: &str) -> Result<()> {
+    let output = hyprctl_output(&["dispatch", dispatcher, parameters])
+        .with_context(|| format!("failed to run hyprctl dispatch {dispatcher}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    validate_hyprland_dispatch_response(dispatcher, output.status.success(), &stdout, &stderr)
+}
+
+fn validate_hyprland_dispatch_response(
+    dispatcher: &str,
+    success: bool,
+    stdout: &str,
+    stderr: &str,
+) -> Result<()> {
+    if !success {
+        let detail = if stderr.is_empty() { stdout } else { stderr };
+        bail!(
+            "hyprctl dispatch {dispatcher} failed{}",
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(": {detail}")
+            }
+        );
+    }
+    if stdout == "ok" {
         Ok(())
     } else {
         bail!(
-            "hyprctl dispatch focuswindow {address} failed: {}",
+            "hyprctl dispatch {dispatcher} returned an unexpected success response: {}",
+            if stdout.is_empty() { "<empty>" } else { stdout }
+        );
+    }
+}
+
+fn query_hyprland_window_bounds(window_id: u64) -> Result<WindowBounds> {
+    let output = hyprctl_output(&["clients", "-j"])
+        .context("failed to query Hyprland geometry after window operation")?;
+    if !output.status.success() {
+        bail!(
+            "hyprctl clients -j failed while verifying window geometry: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
+    parse_hyprland_client_windows(&String::from_utf8_lossy(&output.stdout))?
+        .into_iter()
+        .find(|window| window.window_id == window_id)
+        .with_context(|| {
+            format!("Hyprland no longer reports window {window_id} after the geometry request")
+        })?
+        .bounds
+        .with_context(|| format!("Hyprland returned no bounds for window {window_id}"))
+}
+
+fn optional_coordinate(value: Option<i32>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn hyprctl_output(args: &[&str]) -> std::io::Result<std::process::Output> {
@@ -226,6 +322,29 @@ mod tests {
         let selected = select_hyprland_instance(vec![older, newer]).unwrap();
 
         assert_eq!(selected.signature, "newer");
+    }
+
+    #[test]
+    fn accepts_only_hyprctl_ok_dispatch_response() {
+        validate_hyprland_dispatch_response("movewindowpixel", true, "ok", "").unwrap();
+
+        let error =
+            validate_hyprland_dispatch_response("movewindowpixel", true, "unknown request", "")
+                .unwrap_err();
+        assert!(error.to_string().contains("unexpected success response"));
+    }
+
+    #[test]
+    fn preserves_hyprctl_dispatch_error_detail() {
+        let error = validate_hyprland_dispatch_response(
+            "resizewindowpixel",
+            false,
+            "",
+            "window is not floating",
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("window is not floating"));
     }
 }
 
