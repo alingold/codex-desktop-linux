@@ -215,7 +215,7 @@ fn process_depth(pid: u32, ancestor_pid: u32, by_pid: &HashMap<u32, &ProcessInfo
     usize::MAX
 }
 
-fn looks_like_terminal_window(window: &WindowInfo) -> bool {
+pub(crate) fn looks_like_terminal_window(window: &WindowInfo) -> bool {
     let haystack = [
         window.app_id.as_deref(),
         window.wm_class.as_deref(),

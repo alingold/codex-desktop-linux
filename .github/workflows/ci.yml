@@ -93,8 +93,10 @@ jobs:
             metacity \
             x11-apps \
             x11-utils \
+            xdotool \
             xvfb \
-            xserver-xephyr
+            xserver-xephyr \
+            zenity
 
       - name: Build Computer Use backend
         run: cargo build -p codex-computer-use-linux --bin codex-computer-use-linux

@@ -80,6 +80,7 @@ pub struct PlatformReport {
     pub dbus_session_bus_address: Option<String>,
     pub xdg_runtime_dir: Option<String>,
     pub gnome_shell_version: Check,
+    pub gnome_shell_screenshot: Check,
     pub gnome_screenshot: Check,
 }
 
@@ -212,12 +213,15 @@ fn capability_map(
     if portals.remote_desktop.ok {
         input_backends.push("portal".to_string());
     }
+    if is_x11_platform(platform) && input.xdotool.ok {
+        input_backends.push("xdotool_x11_keyboard_text".to_string());
+    }
     if input.ydotool_socket.ok {
         input_backends.push("ydotool".to_string());
     }
 
     let mut screenshot_backends = Vec::new();
-    if platform.gnome_shell_version.ok {
+    if platform.gnome_shell_screenshot.ok {
         screenshot_backends.push("gnome_shell".to_string());
     }
     if windowing.codex_gnome_shell_extension_screenshot.ok {
@@ -540,6 +544,7 @@ fn platform_report() -> PlatformReport {
         dbus_session_bus_address: dbus_session_address(),
         xdg_runtime_dir: xdg_runtime_dir().map(|path| path.display().to_string()),
         gnome_shell_version: command_check("gnome-shell", &["--version"]),
+        gnome_shell_screenshot: bus_name_check("org.gnome.Shell.Screenshot"),
         gnome_screenshot: command_check("gnome-screenshot", &["--version"]),
     }
 }
@@ -661,7 +666,7 @@ fn readiness_report(
     let can_query_windows = windowing.can_list_windows;
     let can_focus_apps = windowing.can_focus_apps;
     let can_focus_windows = windowing.can_focus_windows;
-    let can_send_development_input = can_send_development_input(portals, input);
+    let can_send_development_input = can_send_development_input(platform, portals, input);
 
     if !can_build_accessibility_tree {
         blockers.push(
@@ -688,7 +693,7 @@ fn readiness_report(
 
     if !can_send_development_input {
         blockers.push(
-            "Development input is unavailable; enable read/write /dev/uinput, XDG RemoteDesktop portal input, or ydotool with a connectable ydotoold socket."
+            "Complete keyboard and pointer input is unavailable; enable XDG RemoteDesktop portal input or ydotool with a connectable ydotoold socket. On X11, xdotool plus read/write /dev/uinput is also complete; /dev/uinput access alone is pointer-only."
                 .to_string(),
         );
     }
@@ -708,7 +713,7 @@ fn readiness_report(
     } else if !can_focus_windows {
         "Enable an exact-focus window backend before using window_id, title, or terminal-targeted input.".to_string()
     } else if !can_send_development_input {
-        "Enable a supported input backend: grant read/write /dev/uinput, enable the XDG RemoteDesktop portal, or start ydotoold with a socket accessible to this desktop user."
+        "Enable a complete input backend: enable the XDG RemoteDesktop portal or start ydotoold with a socket accessible to this desktop user. On X11, install xdotool and grant read/write /dev/uinput; /dev/uinput alone is pointer-only."
             .to_string()
     } else {
         "Computer Use is ready: AT-SPI tree support, window targeting, and a Linux input backend are available."
@@ -727,10 +732,22 @@ fn readiness_report(
     }
 }
 
-fn can_send_development_input(portals: &PortalReport, input: &InputReport) -> bool {
-    input.uinput.ok
-        || portals.remote_desktop.ok
+fn can_send_development_input(
+    platform: &PlatformReport,
+    portals: &PortalReport,
+    input: &InputReport,
+) -> bool {
+    portals.remote_desktop.ok
         || input.ydotool.ok && input.ydotoold.ok && input.ydotool_socket.ok
+        || is_x11_platform(platform) && input.xdotool.ok && input.uinput.ok
+}
+
+fn is_x11_platform(platform: &PlatformReport) -> bool {
+    platform
+        .xdg_session_type
+        .as_deref()
+        .is_some_and(|session| session.eq_ignore_ascii_case("x11"))
+        || (platform.display.is_some() && platform.wayland_display.is_none())
 }
 
 fn is_cosmic_wayland_platform(platform: &PlatformReport) -> bool {
@@ -1022,6 +1039,7 @@ mod tests {
             dbus_session_bus_address: Some("unix:path=/run/user/1000/bus".to_string()),
             xdg_runtime_dir: Some("/run/user/1000".to_string()),
             gnome_shell_version: Check::ok("GNOME Shell 46.0"),
+            gnome_shell_screenshot: Check::ok("org.gnome.Shell.Screenshot"),
             gnome_screenshot: Check::ok("gnome-screenshot 41.0"),
         }
     }
@@ -1117,6 +1135,24 @@ mod tests {
         );
 
         assert!(can_build_accessibility_tree(&report));
+    }
+
+    #[test]
+    fn installed_gnome_shell_binary_does_not_imply_live_screenshot_service() {
+        let mut platform = platform_report();
+        platform.gnome_shell_screenshot = Check::fail("service missing");
+        platform.gnome_screenshot = Check::fail("command missing");
+        let portals = portal_report(Check::fail("portal missing"));
+        let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
+        let windowing = windowing_report(true, true);
+        let input = input_report(false);
+
+        let capabilities = capability_map(&platform, &portals, &accessibility, &windowing, &input);
+
+        assert!(!capabilities
+            .screenshot
+            .iter()
+            .any(|backend| backend == "gnome_shell"));
     }
 
     #[test]
@@ -1279,7 +1315,7 @@ mod tests {
     }
 
     #[test]
-    fn readiness_accepts_direct_uinput_without_connectable_ydotool_socket() {
+    fn readiness_rejects_pointer_only_uinput_as_complete_input() {
         let platform = platform_report();
         let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
         let windowing = windowing_report(true, true);
@@ -1289,6 +1325,36 @@ mod tests {
             Check::fail("no connectable ydotool socket"),
             Check::ok("read/write: /dev/uinput"),
         );
+
+        let readiness = readiness_report(
+            &platform,
+            &portal_report(Check::fail("missing")),
+            &accessibility,
+            &windowing,
+            &input,
+        );
+
+        assert!(!readiness.can_send_development_input);
+        assert!(readiness
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("pointer-only")));
+    }
+
+    #[test]
+    fn readiness_accepts_x11_xdotool_keyboard_plus_absolute_pointer() {
+        let mut platform = platform_report();
+        platform.xdg_session_type = Some("x11".to_string());
+        platform.wayland_display = None;
+        let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
+        let windowing = windowing_report(true, true);
+        let mut input = input_report_parts(
+            Check::fail("ydotool missing"),
+            Check::fail("ydotoold not running"),
+            Check::fail("no socket"),
+            Check::ok("read/write: /dev/uinput"),
+        );
+        input.xdotool = Check::ok("/usr/bin/xdotool");
 
         let readiness = readiness_report(
             &platform,
@@ -1349,11 +1415,11 @@ mod tests {
         assert!(!readiness.can_send_development_input);
         assert!(readiness
             .recommended_next_step
-            .contains("Enable a supported input backend"));
+            .contains("Enable a complete input backend"));
         assert!(readiness
             .blockers
             .iter()
-            .any(|blocker| blocker.contains("Development input is unavailable")));
+            .any(|blocker| blocker.contains("keyboard and pointer input is unavailable")));
     }
 
     #[test]

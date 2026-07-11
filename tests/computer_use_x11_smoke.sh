@@ -4,7 +4,7 @@ set -euo pipefail
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 backend="${COMPUTER_USE_BIN:-$repo_dir/target/debug/codex-computer-use-linux}"
 
-for command in metacity xmessage xdpyinfo node timeout; do
+for command in metacity xdotool xmessage xdpyinfo node timeout zenity; do
     command -v "$command" >/dev/null || {
         echo "[x11-smoke] missing required command: $command" >&2
         exit 1
@@ -33,9 +33,10 @@ x_pid=""
 wm_pid=""
 first_pid=""
 second_pid=""
+text_pid=""
 
 cleanup() {
-    kill "$second_pid" "$first_pid" "$wm_pid" "$x_pid" 2>/dev/null || true
+    kill "$text_pid" "$second_pid" "$first_pid" "$wm_pid" "$x_pid" 2>/dev/null || true
     rm -rf "$work_dir"
 }
 trap cleanup EXIT
@@ -187,4 +188,38 @@ node -e '
   }
 ' "$windows_file" "$primary_id"
 
-echo "[x11-smoke] EWMH list, focus, move, resize, and filtering passed on $DISPLAY"
+unicode_text='Grüße 🌍 — こんにちは'
+zenity --entry --title='Codex X11 Unicode Fixture' --text='Unicode runtime fixture' \
+    >"$work_dir/unicode.txt" 2>"$work_dir/unicode.err" &
+text_pid=$!
+unicode_id=""
+for _ in $(seq 1 50); do
+    "$backend" windows >"$windows_file" 2>/dev/null || true
+    unicode_id="$(node -e '
+      const report = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+      const window = report.windows.find(item => item.title === "Codex X11 Unicode Fixture");
+      if (window) process.stdout.write(String(window.window_id));
+    ' "$windows_file")"
+    [ -n "$unicode_id" ] && break
+    sleep 0.1
+done
+[ -n "$unicode_id" ] || {
+    cat "$work_dir/unicode.err" >&2
+    echo "[x11-smoke] Unicode fixture was not listed" >&2
+    exit 1
+}
+
+mcp_call 6 type_text "{\"window_id\":$unicode_id,\"text\":\"$unicode_text\"}"
+mcp_call 7 press_key "{\"window_id\":$unicode_id,\"key\":\"Enter\"}"
+for _ in $(seq 1 50); do
+    ! kill -0 "$text_pid" 2>/dev/null && break
+    sleep 0.1
+done
+actual_unicode="$(tr -d '\r\n' <"$work_dir/unicode.txt")"
+[ "$actual_unicode" = "$unicode_text" ] || {
+    printf '[x11-smoke] Unicode mismatch: expected %q, got %q\n' "$unicode_text" "$actual_unicode" >&2
+    exit 1
+}
+text_pid=""
+
+echo "[x11-smoke] EWMH list/focus/geometry/filtering and targeted Unicode input passed on $DISPLAY"

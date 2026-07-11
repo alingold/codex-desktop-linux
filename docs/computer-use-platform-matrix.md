@@ -50,5 +50,6 @@ Before calling a desktop/session live certified:
 - Portal permission behavior varies by desktop and portal implementation.
 - Some X11 clients omit `_NET_WM_PID`; exact window id, title, and class targeting remain available.
 - Electron applications may require `--force-renderer-accessibility` before their UI tree is exposed.
-- Full-Unicode text entry on native X11 requires the small `xdotool` paste-chord helper; without it, the backend leaves the clipboard untouched and uses the configured keyboard fallback.
+- Full-Unicode text entry on native X11 requires the small `xdotool` paste-chord helper and a clipboard that is unowned or semantically plain text. Mixed/rich clipboards are left untouched because the current owner cannot faithfully restore every advertised format; non-ASCII input then fails explicitly instead of destroying clipboard data.
+- Direct `/dev/uinput` access is an absolute-pointer backend, not a keyboard backend; `doctor` requires portal keyboard support or a working `ydotoold` path before reporting complete input readiness.
 - A tool schema is fixed for an active Codex task; installing a backend with new tools requires a new task or app restart before those tools appear.

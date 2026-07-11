@@ -13,7 +13,8 @@ It supports:
 - keyboard, click, scroll, and drag input through `/dev/uinput`, XDG
   RemoteDesktop portal, or `ydotool`
 - full-Unicode X11 text entry through a transactional native clipboard path;
-  the previous clipboard is restored and `xdotool` sends only the paste chord
+  plain-text clipboard contents are restored and `xdotool` sends only the
+  paste chord (`Ctrl+Shift+V` for recognized terminals)
 - continuous multi-point drawing gestures for handwriting, curves, and lassos
 - exact-focus, window-relative drags and drawing paths that reject any
   out-of-bounds endpoint or point before sending pointer input
@@ -59,6 +60,14 @@ If `xdotool` is absent, X11 text entry falls back safely to the regular
 keyboard backend before changing the clipboard. Install `ydotool` when you
 need that global fallback input path for keyboard and pointer actions:
 
+The transaction compares and claims clipboard ownership atomically, restores
+only while it still owns the temporary selection, and preserves a newer user
+copy. Because the current owner implementation can faithfully restore one
+plain-text payload but not HTML, images, URI lists, or application-specific
+formats, mixed/rich clipboards are deliberately left untouched. Non-ASCII
+`type_text` then returns an explicit error instead of silently degrading the
+clipboard; `set_value` remains available for an exposed editable AT-SPI field.
+
 ```bash
 # Debian / Ubuntu
 sudo apt install ydotool
@@ -74,8 +83,11 @@ sudo pacman -S ydotool
 sudo zypper install ydotool
 ```
 
-The preferred coordinate input path opens `/dev/uinput` directly. The XDG
-RemoteDesktop portal can also provide input on desktops that expose it.
+The preferred coordinate input path opens `/dev/uinput` directly; that device
+is pointer-only in this backend and does not by itself make keyboard input
+ready. The XDG RemoteDesktop portal can provide both on desktops that expose
+it. Targeted keyboard actions pin the resolved window and reverify it
+immediately before delivery.
 
 For `ydotool`, run a daemon and make sure your user can access the socket:
 

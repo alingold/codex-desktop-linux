@@ -15,6 +15,7 @@ use crate::screenshot::{
     capture_screenshot_raw, prepare_screenshot_payload, RawScreenshotCapture, ScreenshotCapture,
     ScreenshotOutputFormat, ScreenshotPayloadOptions,
 };
+use crate::terminal::looks_like_terminal_window;
 use crate::windowing::registry;
 use crate::windows::{
     focus_window_target, focused_window, list_windows, resolve_window_target,
@@ -47,12 +48,12 @@ use tokio::{
 use zbus::{Connection as ZbusConnection, Proxy as ZbusProxy};
 
 const YDOTOOL_TIMEOUT: Duration = Duration::from_secs(10);
+const XDOTOOL_TIMEOUT: Duration = Duration::from_secs(5);
 const YDOTOOL_TYPE_CHARS_PER_SECOND: u64 = 20;
 const KDE_CLIPBOARD_DBUS_TIMEOUT: Duration = Duration::from_secs(3);
 const KDE_KLIPPER_SERVICE: &str = "org.kde.klipper";
 const KDE_KLIPPER_PATH: &str = "/klipper";
 const KDE_KLIPPER_INTERFACE: &str = "org.kde.klipper.klipper";
-const XDOTOOL_PASTE_ARGS: [&str; 3] = ["key", "--clearmodifiers", "ctrl+v"];
 
 #[derive(Clone, Default)]
 pub struct ComputerUseLinux {
@@ -63,6 +64,9 @@ pub struct ComputerUseLinux {
     abs_pointer: Arc<Mutex<Option<crate::abs_pointer::AbsPointer>>>,
     portal_keyboard_init_lock: Arc<tokio::sync::Mutex<()>>,
     kde_clipboard_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes focus verification and keyboard delivery across concurrent
+    /// MCP calls so one agent action cannot steal another action's target.
+    keyboard_input_lock: Arc<tokio::sync::Mutex<()>>,
     /// Lazily connected, long-lived X11 clipboard owner used for transactional
     /// Unicode paste and restoration on native X11 sessions.
     x11_clipboard: Arc<tokio::sync::Mutex<Option<X11Clipboard>>>,
@@ -1362,8 +1366,9 @@ impl ComputerUseLinux {
         &self,
         Parameters(params): Parameters<PressKeyParams>,
     ) -> Json<ActionOutput> {
+        let _keyboard_guard = self.keyboard_input_lock.lock().await;
         let received = Some(serde_json::json!(params.clone()));
-        let focus = match self.focus_target_for_input(&params.window_target()).await {
+        let mut focus = match self.focus_target_for_input(&params.window_target()).await {
             Ok(focus) => focus,
             Err(message) => {
                 return Json(ActionOutput {
@@ -1375,7 +1380,7 @@ impl ComputerUseLinux {
                 });
             }
         };
-        let Some(key_events) = key_sequence(&params.key) else {
+        let Some((modifiers, keycode)) = key_chord(&params.key) else {
             return Json(ActionOutput {
                 ok: false,
                 implemented: true,
@@ -1384,6 +1389,93 @@ impl ComputerUseLinux {
                 received,
             });
         };
+        let pinned = self.pin_input_target(focus.as_ref()).await;
+        if self.should_prefer_portal_key_chord_backend() {
+            match self.ensure_portal_keyboard_session().await {
+                Ok(Some(session)) => {
+                    match self.refocus_pinned_input_target(pinned.as_ref()).await {
+                        Ok(Some(reverified)) => focus = Some(reverified),
+                        Ok(None) => {}
+                        Err(message) => {
+                            return Json(action_result_with_focus(
+                                "press_key",
+                                Err(message),
+                                received,
+                                focus,
+                            ));
+                        }
+                    }
+                    let portal_modifiers = modifiers
+                        .iter()
+                        .map(|key| i32::from(*key))
+                        .collect::<Vec<_>>();
+                    match press_keycode_chord(&session, &portal_modifiers, i32::from(keycode)).await
+                    {
+                        Ok(()) => {
+                            let notes = self.input_landing_notes(focus.as_ref(), false).await;
+                            return Json(with_notes(
+                                successful_action_with_focus(
+                                    "press_key",
+                                    "Action sent through the remote desktop portal.",
+                                    received,
+                                    focus,
+                                ),
+                                notes,
+                            ));
+                        }
+                        Err(error) => {
+                            self.clear_portal_keyboard_session();
+                            return Json(action_result_with_focus(
+                                "press_key",
+                                Err(format!("{error:#}")),
+                                received,
+                                focus,
+                            ));
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(_) => {}
+            }
+        }
+        match self.refocus_pinned_input_target(pinned.as_ref()).await {
+            Ok(Some(reverified)) => focus = Some(reverified),
+            Ok(None) => {}
+            Err(message) => {
+                return Json(action_result_with_focus(
+                    "press_key",
+                    Err(message),
+                    received,
+                    focus,
+                ));
+            }
+        }
+        if self.is_x11_session() && command_succeeds("xdotool", &["--version"]) {
+            let xdotool_key = xdotool_key_chord(&params.key).expect("validated key chord");
+            match run_xdotool_key(&xdotool_key).await {
+                Ok(()) => {
+                    let notes = self.input_landing_notes(focus.as_ref(), false).await;
+                    return Json(with_notes(
+                        successful_action_with_focus(
+                            "press_key",
+                            "Action sent through native X11 XTEST input.",
+                            received,
+                            focus,
+                        ),
+                        notes,
+                    ));
+                }
+                Err(error) => {
+                    return Json(action_result_with_focus(
+                        "press_key",
+                        Err(error),
+                        received,
+                        focus,
+                    ));
+                }
+            }
+        }
+        let key_events = key_sequence(&params.key).expect("validated key chord");
         let mut args = vec!["key".to_string()];
         args.extend(key_events);
         let result = run_ydotool(&args).await.map(|output| vec![output]);
@@ -1409,8 +1501,9 @@ impl ComputerUseLinux {
         &self,
         Parameters(params): Parameters<TypeTextParams>,
     ) -> Json<ActionOutput> {
+        let _keyboard_guard = self.keyboard_input_lock.lock().await;
         let received = Some(serde_json::json!(params.clone()));
-        let focus = match self.focus_target_for_input(&params.window_target()).await {
+        let mut focus = match self.focus_target_for_input(&params.window_target()).await {
             Ok(focus) => focus,
             Err(message) => {
                 return Json(ActionOutput {
@@ -1422,11 +1515,27 @@ impl ComputerUseLinux {
                 });
             }
         };
+        let pinned = self.pin_input_target(focus.as_ref()).await;
+        let mut backend_notes = Vec::new();
         if self.should_prefer_kde_clipboard_text_backend() {
             match self.ensure_portal_keyboard_session().await {
                 Ok(Some(session)) => {
                     let _clipboard_guard = self.kde_clipboard_lock.lock().await;
-                    match run_kde_clipboard_paste_text(&session, &params.text).await {
+                    match self.refocus_pinned_input_target(pinned.as_ref()).await {
+                        Ok(Some(reverified)) => focus = Some(reverified),
+                        Ok(None) => {}
+                        Err(message) => {
+                            return Json(action_result_with_focus(
+                                "type_text",
+                                Err(message),
+                                received,
+                                focus,
+                            ));
+                        }
+                    }
+                    let terminal_paste = pinned.as_ref().is_some_and(|target| target.terminal);
+                    match run_kde_clipboard_paste_text(&session, &params.text, terminal_paste).await
+                    {
                         Ok(message) => {
                             let notes = self.input_landing_notes(focus.as_ref(), true).await;
                             return Json(with_notes(
@@ -1459,28 +1568,75 @@ impl ComputerUseLinux {
             }
         }
         if self.should_prefer_x11_clipboard_text_backend() {
-            if let Ok(clipboard) = self.ensure_x11_clipboard().await {
-                match clipboard
-                    .paste_text(&params.text, paste_ctrl_v_with_xdotool)
-                    .await
-                {
-                    Ok(report) => {
-                        let notes = self.input_landing_notes(focus.as_ref(), true).await;
-                        return Json(with_notes(
-                            successful_action_with_focus(
+            match self.ensure_x11_clipboard().await {
+                Ok(clipboard) => {
+                    let callback_focus = Arc::new(tokio::sync::Mutex::new(None));
+                    let callback_focus_writer = Arc::clone(&callback_focus);
+                    let pinned_for_callback = pinned.clone();
+                    let terminal_paste = pinned.as_ref().is_some_and(|target| target.terminal);
+                    let paste_result = clipboard
+                        .paste_text(&params.text, || async move {
+                            let reverified = self
+                                .refocus_pinned_input_target(pinned_for_callback.as_ref())
+                                .await?;
+                            if let Some(reverified) = reverified {
+                                *callback_focus_writer.lock().await = Some(reverified);
+                            }
+                            paste_with_xdotool(terminal_paste).await
+                        })
+                        .await;
+                    if let Some(reverified) = callback_focus.lock().await.take() {
+                        focus = Some(reverified);
+                    }
+                    match paste_result {
+                        Ok(report) => {
+                            let notes = self.input_landing_notes(focus.as_ref(), true).await;
+                            return Json(with_notes(
+                                successful_action_with_focus(
+                                    "type_text",
+                                    &x11_clipboard_success_message(&report),
+                                    received,
+                                    focus,
+                                ),
+                                notes,
+                            ));
+                        }
+                        Err(error) if error.can_fallback_to_keyboard() => {
+                            backend_notes.push(format!(
+                                "Native X11 clipboard paste was skipped safely: {}",
+                                error
+                            ));
+                            if !params.text.is_ascii() {
+                                return Json(action_result_with_focus(
+                                    "type_text",
+                                    Err(format!(
+                                        "Did not send non-ASCII text because the native X11 clipboard path could not preserve the current clipboard safely: {error}. The clipboard was left untouched; target an editable element with set_value or retry after the clipboard contains plain text."
+                                    )),
+                                    received,
+                                    focus,
+                                ));
+                            }
+                        }
+                        Err(error) => {
+                            return Json(action_result_with_focus(
                                 "type_text",
-                                &x11_clipboard_success_message(&report),
+                                Err(error.to_string()),
                                 received,
                                 focus,
-                            ),
-                            notes,
-                        ));
+                            ));
+                        }
                     }
-                    Err(error) if error.can_fallback_to_keyboard() => {}
-                    Err(error) => {
+                }
+                Err(error) => {
+                    backend_notes.push(format!(
+                        "Native X11 clipboard integration was unavailable: {error}"
+                    ));
+                    if !params.text.is_ascii() {
                         return Json(action_result_with_focus(
                             "type_text",
-                            Err(error.to_string()),
+                            Err(format!(
+                                "Did not send non-ASCII text because native X11 clipboard initialization failed: {error}"
+                            )),
                             received,
                             focus,
                         ));
@@ -1488,12 +1644,25 @@ impl ComputerUseLinux {
                 }
             }
         }
+        match self.refocus_pinned_input_target(pinned.as_ref()).await {
+            Ok(Some(reverified)) => focus = Some(reverified),
+            Ok(None) => {}
+            Err(message) => {
+                return Json(action_result_with_focus(
+                    "type_text",
+                    Err(message),
+                    received,
+                    focus,
+                ));
+            }
+        }
         if self.should_prefer_portal_keyboard_backend() {
             if let Ok(keysyms) = keysyms_for_text(&params.text) {
                 match self.ensure_portal_keyboard_session().await {
                     Ok(Some(session)) => match type_text_with_keysyms(&session, &keysyms).await {
                         Ok(()) => {
-                            let notes = self.input_landing_notes(focus.as_ref(), true).await;
+                            let mut notes = backend_notes.clone();
+                            notes.extend(self.input_landing_notes(focus.as_ref(), true).await);
                             return Json(with_notes(
                                 successful_action_with_focus(
                                     "type_text",
@@ -1523,10 +1692,11 @@ impl ComputerUseLinux {
             .await
             .map(|output| vec![output]);
         let mut output = action_result_with_focus("type_text", result, received, focus.clone());
+        let mut notes = backend_notes;
         if output.ok && focus.is_some() {
-            let notes = self.input_landing_notes(focus.as_ref(), true).await;
-            output = with_notes(output, notes);
+            notes.extend(self.input_landing_notes(focus.as_ref(), true).await);
         }
+        output = with_notes(output, notes);
         Json(output)
     }
 
@@ -2233,6 +2403,12 @@ struct TypeTextParams {
     title: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+struct PinnedInputTarget {
+    target: WindowTarget,
+    terminal: bool,
+}
+
 impl PressKeyParams {
     fn window_target(&self) -> WindowTarget {
         WindowTarget {
@@ -2333,6 +2509,22 @@ impl ComputerUseLinux {
             return self.is_wayland_session() && !self.is_kde_wayland_session();
         }
         self.is_wayland_session() && !self.is_kde_wayland_session() && ydotool_socket().is_none()
+    }
+
+    fn should_prefer_portal_key_chord_backend(&self) -> bool {
+        if env_flag_enabled_any(&[
+            "COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD",
+            "CODEX_COMPUTER_USE_FORCE_YDOTOOL_KEYBOARD",
+        ]) {
+            return false;
+        }
+        if env_flag_enabled_any(&[
+            "COMPUTER_USE_LINUX_FORCE_PORTAL_KEYBOARD",
+            "CODEX_COMPUTER_USE_FORCE_PORTAL_KEYBOARD",
+        ]) {
+            return self.is_wayland_session();
+        }
+        self.is_wayland_session() && ydotool_socket().is_none()
     }
 
     fn should_prefer_kde_clipboard_text_backend(&self) -> bool {
@@ -2518,6 +2710,39 @@ impl ComputerUseLinux {
         }
     }
 
+    async fn pin_input_target(
+        &self,
+        initial_focus: Option<&WindowFocusResult>,
+    ) -> Option<PinnedInputTarget> {
+        let window = match initial_focus {
+            Some(focus) => focus.requested_window.clone(),
+            None => focused_window().await.ok().flatten()?,
+        };
+        Some(PinnedInputTarget {
+            target: WindowTarget {
+                window_id: Some(window.window_id),
+                ..WindowTarget::default()
+            },
+            terminal: looks_like_terminal_window(&window),
+        })
+    }
+
+    async fn refocus_pinned_input_target(
+        &self,
+        pinned: Option<&PinnedInputTarget>,
+    ) -> std::result::Result<Option<WindowFocusResult>, String> {
+        let Some(pinned) = pinned else {
+            return Ok(None);
+        };
+        self.focus_target_for_input(&pinned.target)
+            .await?
+            .map(Some)
+            .ok_or_else(|| {
+                "Did not send input because the pinned target window could not be reverified."
+                    .to_string()
+            })
+    }
+
     fn cache_desktop_size(&self, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
@@ -2636,7 +2861,7 @@ impl ComputerUseLinux {
         match timeout(Duration::from_millis(1500), focused_element_summary(pid)).await {
             Ok(Ok(Some(element))) => Some(describe_focused_element(&element, expects_editable)),
             Ok(Ok(None)) => Some(
-                "WARNING: AT-SPI reports no focused element in the target app — the input may have landed nowhere. If this is an Electron app, launch it with --force-renderer-accessibility to expose its UI tree."
+                "WARNING: AT-SPI reports no focused element in the target app. Window-level focus was verified, but field-level delivery could not be confirmed; verify visually. If this is an Electron app, launch it with --force-renderer-accessibility to expose its UI tree."
                     .to_string(),
             ),
             Ok(Err(error)) => Some(format!(
@@ -3775,7 +4000,7 @@ fn describe_focused_element(element: &FocusedElementSummary, expects_editable: b
         format!("Focused element: {}{name} (editable).", element.role)
     } else if expects_editable {
         format!(
-            "WARNING: focused element is {}{name}, which AT-SPI does not report as editable. The window received the input, but field-level focus could not be confirmed; verify visually, click the intended input, or use set_value.",
+            "WARNING: focused element is {}{name}, which AT-SPI does not report as editable. Window-level focus was verified, but field-level delivery could not be confirmed; verify visually, click the intended input, or use set_value.",
             element.role
         )
     } else {
@@ -3904,10 +4129,104 @@ async fn run_ydotool(args: &[String]) -> std::result::Result<Output, String> {
     }
 }
 
-async fn paste_ctrl_v_with_xdotool() -> std::result::Result<(), String> {
+fn xdotool_paste_args(terminal: bool) -> [&'static str; 3] {
+    [
+        "key",
+        "--clearmodifiers",
+        if terminal { "ctrl+shift+v" } else { "ctrl+v" },
+    ]
+}
+
+fn xdotool_key_chord(key: &str) -> Option<String> {
+    let parts = key
+        .split('+')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    let (key_part, modifier_parts) = parts.split_last()?;
+    let mut canonical = modifier_parts
+        .iter()
+        .map(|modifier| match normalize_key(modifier).as_str() {
+            "ctrl" | "control" => Some("ctrl"),
+            "alt" | "option" => Some("alt"),
+            "shift" => Some("shift"),
+            "meta" | "super" | "cmd" | "command" => Some("super"),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    canonical.push(xdotool_key_name(key_part)?);
+    Some(canonical.join("+"))
+}
+
+fn xdotool_key_name(key: &str) -> Option<&'static str> {
+    match normalize_key(key).as_str() {
+        "ctrl" | "control" => Some("ctrl"),
+        "alt" | "option" => Some("alt"),
+        "shift" => Some("shift"),
+        "meta" | "super" | "cmd" | "command" => Some("super"),
+        "enter" | "return" => Some("Return"),
+        "escape" | "esc" => Some("Escape"),
+        "tab" => Some("Tab"),
+        "backspace" => Some("BackSpace"),
+        "delete" | "del" => Some("Delete"),
+        "space" => Some("space"),
+        "home" => Some("Home"),
+        "end" => Some("End"),
+        "pageup" | "page_up" => Some("Page_Up"),
+        "pagedown" | "page_down" => Some("Page_Down"),
+        "arrowleft" | "left" => Some("Left"),
+        "arrowright" | "right" => Some("Right"),
+        "arrowup" | "up" => Some("Up"),
+        "arrowdown" | "down" => Some("Down"),
+        "f1" => Some("F1"),
+        "f2" => Some("F2"),
+        "f3" => Some("F3"),
+        "f4" => Some("F4"),
+        "f5" => Some("F5"),
+        "f6" => Some("F6"),
+        "f7" => Some("F7"),
+        "f8" => Some("F8"),
+        "f9" => Some("F9"),
+        "f10" => Some("F10"),
+        "f11" => Some("F11"),
+        "f12" => Some("F12"),
+        value if value.len() == 1 && value.as_bytes()[0].is_ascii_alphanumeric() => {
+            const ASCII_KEY_NAMES: [&str; 36] = [
+                "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f",
+                "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v",
+                "w", "x", "y", "z",
+            ];
+            ASCII_KEY_NAMES
+                .iter()
+                .copied()
+                .find(|candidate| *candidate == value)
+        }
+        _ => None,
+    }
+}
+
+async fn run_xdotool_key(key: &str) -> std::result::Result<(), String> {
     let mut command = TokioCommand::new("xdotool");
     command
-        .args(XDOTOOL_PASTE_ARGS)
+        .args(["key", "--clearmodifiers", key])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let output = timeout(XDOTOOL_TIMEOUT, command.output())
+        .await
+        .map_err(|_| format!("xdotool timed out after {}s", XDOTOOL_TIMEOUT.as_secs()))?
+        .map_err(|error| format!("failed to run xdotool: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(command_output_error("xdotool", output))
+    }
+}
+
+async fn paste_with_xdotool(terminal: bool) -> std::result::Result<(), String> {
+    let mut command = TokioCommand::new("xdotool");
+    command
+        .args(xdotool_paste_args(terminal))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
@@ -4040,6 +4359,7 @@ fn ydotool_type_timeout(text: &str) -> Duration {
 }
 
 const EVDEV_KEY_LEFTCTRL: i32 = 29;
+const EVDEV_KEY_LEFTSHIFT: i32 = 42;
 const EVDEV_KEY_V: i32 = 47;
 const KDE_CLIPBOARD_RESTORE_MIN_DELAY_MS: u64 = 1_500;
 const KDE_CLIPBOARD_RESTORE_MAX_DELAY_MS: u64 = 5_000;
@@ -4083,6 +4403,7 @@ impl KdeClipboardPasteError {
 async fn run_kde_clipboard_paste_text(
     session: &PortalKeyboardSession,
     text: &str,
+    terminal_paste: bool,
 ) -> std::result::Result<String, KdeClipboardPasteError> {
     let previous = kde_clipboard_contents()
         .await
@@ -4091,16 +4412,31 @@ async fn run_kde_clipboard_paste_text(
         .await
         .map_err(KdeClipboardPasteError::before_text_input)?;
 
-    let paste_result = press_keycode_chord(session, &[EVDEV_KEY_LEFTCTRL], EVDEV_KEY_V)
+    let (paste_modifiers, paste_key) = if terminal_paste {
+        (&[EVDEV_KEY_LEFTCTRL, EVDEV_KEY_LEFTSHIFT][..], EVDEV_KEY_V)
+    } else {
+        (&[EVDEV_KEY_LEFTCTRL][..], EVDEV_KEY_V)
+    };
+    let paste_result = press_keycode_chord(session, paste_modifiers, paste_key)
         .await
         .map_err(|error| format!("{error:#}"));
 
     sleep(kde_clipboard_restore_delay(text)).await;
-    let restore_result = kde_set_clipboard_contents(&previous).await;
+    let restore_result = restore_kde_clipboard_if_unchanged(text, &previous).await;
 
     match (paste_result, restore_result) {
-        (Ok(_), Ok(_)) => Ok("Action pasted through KDE clipboard integration.".to_string()),
-        (Err(error), Ok(_)) => Err(KdeClipboardPasteError::after_portal_input(error)),
+        (Ok(_), Ok(true)) => Ok("Action pasted through KDE clipboard integration.".to_string()),
+        (Ok(_), Ok(false)) => Ok(
+            "Action pasted through KDE clipboard integration. The clipboard changed during paste, so the newer contents were preserved."
+                .to_string(),
+        ),
+        (Err(error), Ok(restored)) => Err(KdeClipboardPasteError::after_portal_input(
+            if restored {
+                error
+            } else {
+                format!("{error}; the clipboard changed during paste, so the newer contents were preserved")
+            },
+        )),
         (Ok(_), Err(restore_error)) => Ok(format!(
             "Action pasted through KDE clipboard integration. Warning: previous KDE clipboard contents could not be restored: {restore_error}"
         )),
@@ -4108,6 +4444,22 @@ async fn run_kde_clipboard_paste_text(
             format!("{error}; previous KDE clipboard contents could not be restored: {restore_error}"),
         )),
     }
+}
+
+async fn restore_kde_clipboard_if_unchanged(
+    temporary: &str,
+    previous: &str,
+) -> std::result::Result<bool, String> {
+    let current = kde_clipboard_contents().await?;
+    if !kde_clipboard_can_restore(&current, temporary) {
+        return Ok(false);
+    }
+    kde_set_clipboard_contents(previous).await?;
+    Ok(true)
+}
+
+fn kde_clipboard_can_restore(current: &str, temporary: &str) -> bool {
+    current == temporary
 }
 
 async fn kde_clipboard_contents() -> std::result::Result<String, String> {
@@ -4249,22 +4601,7 @@ fn mouse_button_code(button: Option<&str>) -> String {
 }
 
 fn key_sequence(key: &str) -> Option<Vec<String>> {
-    let parts = key
-        .split('+')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-    let (key_part, modifier_parts) = parts.split_last()?;
-    if modifier_parts.is_empty() {
-        if let Some(modifier) = modifier_keycode(key_part) {
-            return Some(vec![format!("{modifier}:1"), format!("{modifier}:0")]);
-        }
-    }
-    let mut modifiers = Vec::new();
-    for part in modifier_parts {
-        modifiers.push(modifier_keycode(part)?);
-    }
-    let keycode = keycode(key_part)?;
+    let (modifiers, keycode) = key_chord(key)?;
 
     let mut events = Vec::new();
     for modifier in &modifiers {
@@ -4276,6 +4613,26 @@ fn key_sequence(key: &str) -> Option<Vec<String>> {
         events.push(format!("{modifier}:0"));
     }
     Some(events)
+}
+
+fn key_chord(key: &str) -> Option<(Vec<u16>, u16)> {
+    let parts = key
+        .split('+')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    let (key_part, modifier_parts) = parts.split_last()?;
+    if modifier_parts.is_empty() {
+        if let Some(modifier) = modifier_keycode(key_part) {
+            return Some((Vec::new(), modifier));
+        }
+    }
+    let mut modifiers = Vec::new();
+    for part in modifier_parts {
+        modifiers.push(modifier_keycode(part)?);
+    }
+    let keycode = keycode(key_part)?;
+    Some((modifiers, keycode))
 }
 
 fn modifier_keycode(key: &str) -> Option<u16> {
@@ -5094,6 +5451,12 @@ mod tests {
         );
     }
 
+    #[test]
+    fn kde_clipboard_restoration_preserves_concurrent_user_copy() {
+        assert!(kde_clipboard_can_restore("temporary", "temporary"));
+        assert!(!kde_clipboard_can_restore("new user copy", "temporary"));
+    }
+
     #[tokio::test]
     async fn kde_clipboard_dbus_operation_times_out_when_pending() {
         let error = kde_clipboard_dbus_operation_with_timeout(
@@ -5383,6 +5746,11 @@ mod tests {
                 "29:0".to_string(),
             ])
         );
+        assert_eq!(key_chord("Ctrl+Shift+P"), Some((vec![29, 42], 25)));
+        assert_eq!(
+            xdotool_key_chord("Ctrl+Shift+P").as_deref(),
+            Some("ctrl+shift+p")
+        );
     }
 
     #[test]
@@ -5391,6 +5759,8 @@ mod tests {
             key_sequence("Super"),
             Some(vec!["125:1".to_string(), "125:0".to_string()])
         );
+        assert_eq!(key_chord("Super"), Some((Vec::new(), 125)));
+        assert_eq!(xdotool_key_chord("Super").as_deref(), Some("super"));
     }
 
     #[test]
@@ -5694,7 +6064,8 @@ mod tests {
         let described = describe_focused_element(&element, true);
         assert!(described.contains("WARNING"));
         assert!(described.contains("does not report as editable"));
-        assert!(described.contains("field-level focus could not be confirmed"));
+        assert!(described.contains("Window-level focus was verified"));
+        assert!(described.contains("field-level delivery could not be confirmed"));
         assert!(!described.contains("likely went nowhere"));
     }
 
@@ -5721,7 +6092,14 @@ mod tests {
 
     #[test]
     fn x11_clipboard_paste_clears_stale_modifiers() {
-        assert_eq!(XDOTOOL_PASTE_ARGS, ["key", "--clearmodifiers", "ctrl+v"]);
+        assert_eq!(
+            xdotool_paste_args(false),
+            ["key", "--clearmodifiers", "ctrl+v"]
+        );
+        assert_eq!(
+            xdotool_paste_args(true),
+            ["key", "--clearmodifiers", "ctrl+shift+v"]
+        );
     }
 
     #[test]
