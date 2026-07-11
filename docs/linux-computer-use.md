@@ -13,6 +13,8 @@ It supports:
 - keyboard, text, click, scroll, and drag input through `/dev/uinput`, XDG
   RemoteDesktop portal, or `ydotool`
 - continuous multi-point drawing gestures for handwriting, curves, and lassos
+- focus-verified, window-relative drawing paths that reject out-of-bounds
+  points before sending any input
 - exact X11 window activation plus EWMH move/resize control on Cinnamon, MATE,
   XFCE, and compatible window managers
 - application-focused X11 discovery that omits desktop, dock, notification,

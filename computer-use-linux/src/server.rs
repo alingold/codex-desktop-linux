@@ -1095,7 +1095,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "draw_path",
-        description = "Draw or drag along a continuous path. Holds the selected mouse button while visiting every pixel coordinate in order, then releases it. Use this instead of repeated drag calls for handwriting, signatures, freeform drawing, lassos, and curves. Provide 2-512 points; point_delay_ms defaults to 12ms.",
+        description = "Draw or drag along a continuous path. Holds the selected mouse button while visiting every pixel coordinate in order, then releases it. Use this instead of repeated drag calls for handwriting, signatures, freeform drawing, lassos, and curves. Provide 2-512 points; point_delay_ms defaults to 12ms. With a window target, focus is verified and every point must remain inside that window. Set relative=true to use window-cropped screenshot coordinates.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1105,9 +1105,9 @@ impl ComputerUseLinux {
     )]
     async fn draw_path(
         &self,
-        Parameters(params): Parameters<DrawPathParams>,
+        Parameters(mut params): Parameters<DrawPathParams>,
     ) -> Json<ActionOutput> {
-        let received = Some(serde_json::json!(params));
+        let received = Some(serde_json::json!(params.clone()));
         if !(2..=512).contains(&params.points.len()) {
             return Json(ActionOutput {
                 ok: false,
@@ -1117,11 +1117,6 @@ impl ComputerUseLinux {
                 received,
             });
         }
-        let points = params
-            .points
-            .iter()
-            .map(|point| (point.x, point.y))
-            .collect::<Vec<_>>();
         let delay = Duration::from_millis(u64::from(params.point_delay_ms.clamp(1, 100)));
         let Some((button_press, button_release)) =
             ydotool_pointer_button_masks(params.button.as_deref())
@@ -1134,8 +1129,70 @@ impl ComputerUseLinux {
                 received,
             });
         };
+        let window_target = params.window_target();
+        if params.relative == Some(true) && window_target.is_none() {
+            return Json(ActionOutput {
+                ok: false,
+                implemented: true,
+                action: "draw_path".to_string(),
+                message: "Relative draw_path coordinates require a window target.".to_string(),
+                received,
+            });
+        }
+        let mut focus = None;
+        if let Some(target) = window_target {
+            focus = match self.focus_target_for_input(&target).await {
+                Ok(focus) => focus,
+                Err(message) => {
+                    return Json(ActionOutput {
+                        ok: false,
+                        implemented: true,
+                        action: "draw_path".to_string(),
+                        message,
+                        received,
+                    });
+                }
+            };
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            let Some(verified_focus) = focus.as_ref() else {
+                return Json(ActionOutput {
+                    ok: false,
+                    implemented: true,
+                    action: "draw_path".to_string(),
+                    message: "Targeted draw_path requires verified target-window focus."
+                        .to_string(),
+                    received,
+                });
+            };
+            let validation = if params.relative == Some(true) {
+                apply_window_relative_path_coordinates(&mut params, verified_focus)
+            } else {
+                validate_absolute_path_coordinates(&params.points, verified_focus)
+            };
+            if let Err(message) = validation {
+                return Json(ActionOutput {
+                    ok: false,
+                    implemented: true,
+                    action: "draw_path".to_string(),
+                    message,
+                    received,
+                });
+            }
+        }
         let abs_button = crate::abs_pointer::PointerButton::from_name(params.button.as_deref());
         let portal_button = PointerButton::from_name(params.button.as_deref());
+        let points = params
+            .points
+            .iter()
+            .map(|point| (point.x, point.y))
+            .collect::<Vec<_>>();
+        let off_screen_note = match focus
+            .as_ref()
+            .and_then(|focus| focused_or_requested_bounds(focus))
+        {
+            Some(bounds) => self.off_screen_note_for_bounds(bounds).await,
+            None => None,
+        };
 
         if self.ensure_abs_pointer().await {
             let abs_pointer = Arc::clone(&self.abs_pointer);
@@ -1153,28 +1210,34 @@ impl ComputerUseLinux {
             .ok()
             .flatten();
             if drawn == Some(true) {
-                return Json(ActionOutput {
-                    ok: true,
-                    implemented: true,
-                    action: "draw_path".to_string(),
-                    message: "Continuous path sent through the uinput absolute pointer."
-                        .to_string(),
-                    received,
-                });
+                return Json(with_notes(
+                    ActionOutput {
+                        ok: true,
+                        implemented: true,
+                        action: "draw_path".to_string(),
+                        message: "Continuous path sent through the uinput absolute pointer."
+                            .to_string(),
+                        received,
+                    },
+                    off_screen_note.clone(),
+                ));
             }
         }
 
         if let Some(session) = self.cached_portal_pointer_session() {
             match portal_draw_path(&session, &points, portal_button, delay).await {
                 Ok(()) => {
-                    return Json(ActionOutput {
-                        ok: true,
-                        implemented: true,
-                        action: "draw_path".to_string(),
-                        message: "Continuous path sent through the remote desktop portal."
-                            .to_string(),
-                        received,
-                    });
+                    return Json(with_notes(
+                        ActionOutput {
+                            ok: true,
+                            implemented: true,
+                            action: "draw_path".to_string(),
+                            message: "Continuous path sent through the remote desktop portal."
+                                .to_string(),
+                            received,
+                        },
+                        off_screen_note.clone(),
+                    ));
                 }
                 Err(_) => self.clear_portal_pointer_session(),
             }
@@ -1182,14 +1245,17 @@ impl ComputerUseLinux {
             if let Ok(Some(session)) = self.ensure_portal_pointer_session().await {
                 match portal_draw_path(&session, &points, portal_button, delay).await {
                     Ok(()) => {
-                        return Json(ActionOutput {
-                            ok: true,
-                            implemented: true,
-                            action: "draw_path".to_string(),
-                            message: "Continuous path sent through the remote desktop portal."
-                                .to_string(),
-                            received,
-                        });
+                        return Json(with_notes(
+                            ActionOutput {
+                                ok: true,
+                                implemented: true,
+                                action: "draw_path".to_string(),
+                                message: "Continuous path sent through the remote desktop portal."
+                                    .to_string(),
+                                received,
+                            },
+                            off_screen_note.clone(),
+                        ));
                     }
                     Err(_) => self.clear_portal_pointer_session(),
                 }
@@ -1197,17 +1263,17 @@ impl ComputerUseLinux {
         }
 
         let mut sequence = Vec::with_capacity(params.points.len() + 2);
-        sequence.push(absolute_mousemove_args(
-            params.points[0].x,
-            params.points[0].y,
-        ));
+        sequence.push(absolute_mousemove_args(points[0].0, points[0].1));
         sequence.push(vec!["click".to_string(), button_press.to_string()]);
-        for point in &params.points[1..] {
-            sequence.push(absolute_mousemove_args(point.x, point.y));
+        for &(x, y) in &points[1..] {
+            sequence.push(absolute_mousemove_args(x, y));
         }
         sequence.push(vec!["click".to_string(), button_release.to_string()]);
         let result = run_ydotool_sequence(&sequence).await;
-        Json(action_result("draw_path", result, received))
+        Json(with_notes(
+            action_result("draw_path", result, received),
+            off_screen_note,
+        ))
     }
 
     #[tool(
@@ -1939,6 +2005,43 @@ struct DrawPathParams {
     point_delay_ms: u16,
     #[serde(default)]
     button: Option<String>,
+    #[serde(default)]
+    window_id: Option<u64>,
+    #[serde(default)]
+    pid: Option<u32>,
+    #[serde(default)]
+    app_id: Option<String>,
+    #[serde(default)]
+    wm_class: Option<String>,
+    #[serde(default)]
+    window_title: Option<String>,
+    /// Interpret every point as relative to the target window's top-left.
+    #[serde(default)]
+    relative: Option<bool>,
+}
+
+impl DrawPathParams {
+    fn window_target(&self) -> Option<WindowTarget> {
+        if self.window_id.is_none()
+            && self.pid.is_none()
+            && self.app_id.is_none()
+            && self.wm_class.is_none()
+            && self.window_title.is_none()
+        {
+            return None;
+        }
+        Some(WindowTarget {
+            window_id: self.window_id,
+            pid: self.pid,
+            tty: None,
+            terminal_pid: None,
+            terminal_command: None,
+            terminal_cwd: None,
+            app_id: self.app_id.clone(),
+            wm_class: self.wm_class.clone(),
+            title: self.window_title.clone(),
+        })
+    }
 }
 
 fn default_path_point_delay_ms() -> u16 {
@@ -3223,6 +3326,85 @@ fn apply_window_relative_scroll_coordinates(
     Ok(())
 }
 
+fn focused_or_requested_bounds(
+    focus: &WindowFocusResult,
+) -> Option<&crate::windowing::WindowBounds> {
+    focus
+        .focused_window
+        .as_ref()
+        .and_then(|window| window.bounds.as_ref())
+        .or(focus.requested_window.bounds.as_ref())
+}
+
+fn apply_window_relative_path_coordinates(
+    params: &mut DrawPathParams,
+    focus: &WindowFocusResult,
+) -> std::result::Result<(), String> {
+    let bounds = focused_or_requested_bounds(focus).ok_or_else(|| {
+        "Relative draw_path coordinates require resolved target-window bounds.".to_string()
+    })?;
+    if bounds.width == 0 || bounds.height == 0 {
+        return Err(
+            "Relative draw_path coordinates require non-empty target-window bounds.".to_string(),
+        );
+    }
+    let (origin_x, origin_y) = bounds.x.zip(bounds.y).ok_or_else(|| {
+        "Relative draw_path coordinates require target-window bounds with an origin.".to_string()
+    })?;
+    if params.points.iter().any(|point| {
+        point.x < 0
+            || point.y < 0
+            || point.x as u32 >= bounds.width
+            || point.y as u32 >= bounds.height
+    }) {
+        return Err(
+            "Every relative draw_path point must be inside target-window bounds.".to_string(),
+        );
+    }
+    let translated = params
+        .points
+        .iter()
+        .map(|point| {
+            let x = origin_x
+                .checked_add(point.x)
+                .ok_or_else(|| "Relative draw_path x coordinate overflowed.".to_string())?;
+            let y = origin_y
+                .checked_add(point.y)
+                .ok_or_else(|| "Relative draw_path y coordinate overflowed.".to_string())?;
+            Ok((x, y))
+        })
+        .collect::<std::result::Result<Vec<_>, String>>()?;
+    for (point, (x, y)) in params.points.iter_mut().zip(translated) {
+        point.x = x;
+        point.y = y;
+    }
+    Ok(())
+}
+
+fn validate_absolute_path_coordinates(
+    points: &[PointerPathPoint],
+    focus: &WindowFocusResult,
+) -> std::result::Result<(), String> {
+    let bounds = focused_or_requested_bounds(focus)
+        .ok_or_else(|| "Targeted draw_path requires resolved target-window bounds.".to_string())?;
+    let (origin_x, origin_y) = bounds.x.zip(bounds.y).ok_or_else(|| {
+        "Targeted draw_path requires target-window bounds with an origin.".to_string()
+    })?;
+    let max_x = i64::from(origin_x) + i64::from(bounds.width);
+    let max_y = i64::from(origin_y) + i64::from(bounds.height);
+    if points.iter().any(|point| {
+        i64::from(point.x) < i64::from(origin_x)
+            || i64::from(point.y) < i64::from(origin_y)
+            || i64::from(point.x) >= max_x
+            || i64::from(point.y) >= max_y
+    }) {
+        return Err(
+            "Every targeted draw_path point must be inside target-window bounds.".to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Crop a PNG image to `(x, y, w, h)` (clamped to the image), returning the
 /// re-encoded PNG and the actual cropped dimensions.
 fn crop_png(
@@ -4097,6 +4279,66 @@ mod tests {
         apply_window_relative_click_coordinates(&mut params, &focus).unwrap();
 
         assert_eq!((params.x, params.y), (Some(107), Some(209)));
+    }
+
+    fn draw_path_params(points: &[(i32, i32)]) -> DrawPathParams {
+        DrawPathParams {
+            points: points
+                .iter()
+                .map(|&(x, y)| PointerPathPoint { x, y })
+                .collect(),
+            point_delay_ms: default_path_point_delay_ms(),
+            button: None,
+            window_id: Some(42),
+            pid: None,
+            app_id: None,
+            wm_class: None,
+            window_title: None,
+            relative: Some(true),
+        }
+    }
+
+    #[test]
+    fn relative_draw_path_translates_every_point_atomically() {
+        let focus = focus_result_with_bounds(Some(window_bounds(Some(100), Some(200), 800, 600)));
+        let mut params = draw_path_params(&[(0, 0), (400, 300), (799, 599)]);
+
+        apply_window_relative_path_coordinates(&mut params, &focus).unwrap();
+
+        let points = params
+            .points
+            .iter()
+            .map(|point| (point.x, point.y))
+            .collect::<Vec<_>>();
+        assert_eq!(points, vec![(100, 200), (500, 500), (899, 799)]);
+    }
+
+    #[test]
+    fn relative_draw_path_rejects_any_out_of_bounds_point_without_mutation() {
+        let focus = focus_result_with_bounds(Some(window_bounds(Some(100), Some(200), 800, 600)));
+        let mut params = draw_path_params(&[(10, 20), (800, 20)]);
+
+        let error = apply_window_relative_path_coordinates(&mut params, &focus).unwrap_err();
+
+        assert!(error.contains("Every relative draw_path point"));
+        assert_eq!(params.points[0].x, 10);
+        assert_eq!(params.points[0].y, 20);
+    }
+
+    #[test]
+    fn targeted_absolute_draw_path_rejects_points_outside_window() {
+        let focus = focus_result_with_bounds(Some(window_bounds(Some(100), Some(200), 800, 600)));
+        let inside = vec![
+            PointerPathPoint { x: 100, y: 200 },
+            PointerPathPoint { x: 899, y: 799 },
+        ];
+        let outside = vec![
+            PointerPathPoint { x: 100, y: 200 },
+            PointerPathPoint { x: 900, y: 799 },
+        ];
+
+        validate_absolute_path_coordinates(&inside, &focus).unwrap();
+        assert!(validate_absolute_path_coordinates(&outside, &focus).is_err());
     }
 
     #[test]
