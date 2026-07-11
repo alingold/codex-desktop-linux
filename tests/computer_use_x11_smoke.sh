@@ -121,9 +121,55 @@ mcp_call() {
     ' "$work_dir/mcp-$id.jsonl" "$id"
 }
 
+mcp_call_rejected() {
+    local id="$1"
+    local name="$2"
+    local arguments="$3"
+    local expected_message="$4"
+    printf '%s\n' \
+        '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"x11-runtime-smoke","version":"1"}}}' \
+        '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+        "{\"jsonrpc\":\"2.0\",\"id\":$id,\"method\":\"tools/call\",\"params\":{\"name\":\"$name\",\"arguments\":$arguments}}" \
+        | timeout 5 "$backend" mcp >"$work_dir/mcp-$id.jsonl" || true
+    node -e '
+      const lines = require("fs").readFileSync(process.argv[1], "utf8").trim().split("\n");
+      const id = Number(process.argv[2]);
+      const expected = process.argv[3];
+      const response = lines.map(line => JSON.parse(line)).find(item => item.id === id);
+      const output = response?.result?.structuredContent;
+      if (!output || output.ok !== false || !String(output.message).includes(expected)) {
+        console.error(JSON.stringify(response));
+        process.exit(1);
+      }
+    ' "$work_dir/mcp-$id.jsonl" "$id" "$expected_message"
+}
+
+require_tool_property() {
+    local tool_name="$1"
+    local property_name="$2"
+    printf '%s\n' \
+        '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"x11-runtime-smoke","version":"1"}}}' \
+        '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+        '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+        | timeout 5 "$backend" mcp >"$work_dir/tools.jsonl" || true
+    node -e '
+      const lines = require("fs").readFileSync(process.argv[1], "utf8").trim().split("\n");
+      const response = lines.map(line => JSON.parse(line)).find(item => item.id === 2);
+      const tool = response?.result?.tools?.find(item => item.name === process.argv[2]);
+      if (!tool?.inputSchema?.properties?.[process.argv[3]]) {
+        console.error(`${process.argv[2]} is missing required schema property ${process.argv[3]}`);
+        process.exit(1);
+      }
+    ' "$work_dir/tools.jsonl" "$tool_name" "$property_name"
+}
+
 mcp_call 2 activate_window "{\"window_id\":$primary_id}"
 mcp_call 3 move_window "{\"window_id\":$primary_id,\"x\":120,\"y\":130}"
 mcp_call 4 resize_window "{\"window_id\":$primary_id,\"width\":480,\"height\":240}"
+require_tool_property draw_path relative
+mcp_call_rejected 5 draw_path \
+    "{\"window_id\":$primary_id,\"relative\":true,\"points\":[{\"x\":10,\"y\":10},{\"x\":9999,\"y\":10}]}" \
+    "Every relative draw_path point"
 
 "$backend" windows >"$windows_file"
 node -e '
