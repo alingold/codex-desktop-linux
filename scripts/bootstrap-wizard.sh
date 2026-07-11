@@ -315,6 +315,10 @@ computer_use_ydotool_packages() {
     esac
 }
 
+computer_use_x11_clipboard_packages() {
+    printf 'xdotool'
+}
+
 uinput_summary() {
     local uinput_path="${CODEX_BOOTSTRAP_UINPUT_PATH:-/dev/uinput}"
     if [ ! -e "$uinput_path" ]; then
@@ -702,6 +706,7 @@ print_computer_use_details() {
     info "  uinput=$(uinput_summary)"
     info "  current user in input group=$(input_group_summary)"
     info "  Window backend hint: $(window_backend_hint)"
+    info "  Suggested X11 Unicode paste command: $(install_command_for_packages "$(computer_use_x11_clipboard_packages)")"
     info "  Suggested ydotool command: $(install_command_for_packages "$(computer_use_ydotool_packages)")"
     info "  Suggested portal package: $(install_command_for_packages "$(computer_use_portal_packages)")"
     info "  Suggested ydotool service command: sudo systemctl enable --now ydotoold.service"
@@ -937,7 +942,7 @@ print_system_summary() {
     info "Atomic host: $atomic_host"
     info "Session: XDG_CURRENT_DESKTOP=${XDG_CURRENT_DESKTOP:-unknown} DESKTOP_SESSION=${DESKTOP_SESSION:-unknown} XDG_SESSION_TYPE=${XDG_SESSION_TYPE:-unknown} WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-none} DISPLAY=${DISPLAY:-none}"
     info "Helpers: pkexec=$(command_status pkexec) kdialog=$(command_status kdialog) zenity=$(command_status zenity)"
-    info "Computer Use readiness: ydotool=$(command_status ydotool) ydotoold=$(command_status ydotoold) ydotoold.service(system)=[$(service_state ydotoold.service system)] ydotoold.service(user)=[$(service_state ydotoold.service user)] ydotool.service(system)=[$(service_state ydotool.service system)] ydotool.service(user)=[$(service_state ydotool.service user)] socket=$(ydotool_socket_summary) portal=$(portal_summary)"
+    info "Computer Use readiness: xdotool=$(command_status xdotool) ydotool=$(command_status ydotool) ydotoold=$(command_status ydotoold) ydotoold.service(system)=[$(service_state ydotoold.service system)] ydotoold.service(user)=[$(service_state ydotoold.service user)] ydotool.service(system)=[$(service_state ydotool.service system)] ydotool.service(user)=[$(service_state ydotool.service user)] socket=$(ydotool_socket_summary) portal=$(portal_summary)"
     info "Installed package: $(installed_package_version)"
     info "Installed updater mode: $(updater_install_summary)"
 }

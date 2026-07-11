@@ -17,7 +17,7 @@ combination is certified.
 
 | Session/backend | Evidence | Window list/focus | Move/resize | Input | Screenshot | Accessibility |
 | --- | --- | --- | --- | --- | --- | --- |
-| Linux Mint Cinnamon / X11 | Live certified | EWMH | EWMH | absolute uinput, portal, ydotool | GNOME-compatible DBus or portal | native Rust AT-SPI |
+| Linux Mint Cinnamon / X11 | Live certified | EWMH | EWMH | native Unicode clipboard + xdotool paste chord, absolute uinput, portal, ydotool | GNOME-compatible DBus or portal | native Rust AT-SPI |
 | Generic EWMH X11 / Metacity | Runtime tested | EWMH | EWMH | safety validation only in headless CI | not exercised in headless CI | not exercised in headless CI |
 | GNOME / Wayland or X11 | Implemented | Shell extension or Introspect | Shell extension | portal, absolute uinput, ydotool | Shell, extension, or portal | native Rust AT-SPI |
 | KDE Plasma / Wayland or X11 | Implemented | KWin scripting | KWin scripting where supported | portal, absolute uinput, ydotool | portal | native Rust AT-SPI |
@@ -50,4 +50,5 @@ Before calling a desktop/session live certified:
 - Portal permission behavior varies by desktop and portal implementation.
 - Some X11 clients omit `_NET_WM_PID`; exact window id, title, and class targeting remain available.
 - Electron applications may require `--force-renderer-accessibility` before their UI tree is exposed.
+- Full-Unicode text entry on native X11 requires the small `xdotool` paste-chord helper; without it, the backend leaves the clipboard untouched and uses the configured keyboard fallback.
 - A tool schema is fixed for an active Codex task; installing a backend with new tools requires a new task or app restart before those tools appear.

@@ -119,6 +119,9 @@ pub struct WindowingReport {
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct InputReport {
+    /// X11-only paste-chord helper used with the native transactional
+    /// clipboard path for layout-independent Unicode text entry.
+    pub xdotool: Check,
     pub ydotool: Check,
     pub ydotoold: Check,
     pub ydotool_socket: Check,
@@ -638,6 +641,7 @@ fn check_from_backend_probe(probe: &registry::BackendProbe) -> Check {
 
 fn input_report() -> InputReport {
     InputReport {
+        xdotool: command_path_check("xdotool"),
         ydotool: command_path_check("ydotool"),
         ydotoold: process_check("ydotoold"),
         ydotool_socket: ydotool_socket_check(),
@@ -1090,6 +1094,7 @@ mod tests {
         uinput: Check,
     ) -> InputReport {
         InputReport {
+            xdotool: ydotool.clone(),
             ydotool,
             ydotoold,
             ydotool_socket,

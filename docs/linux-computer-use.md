@@ -10,8 +10,10 @@ It supports:
 - screenshots through GNOME Shell DBus, the Codex GNOME Shell extension, or XDG Desktop Portal
 - window listing and focusing on GNOME, KWin/Plasma, Hyprland, COSMIC, i3,
   and EWMH-compliant X11 desktops including Cinnamon, MATE, and XFCE
-- keyboard, text, click, scroll, and drag input through `/dev/uinput`, XDG
+- keyboard, click, scroll, and drag input through `/dev/uinput`, XDG
   RemoteDesktop portal, or `ydotool`
+- full-Unicode X11 text entry through a transactional native clipboard path;
+  the previous clipboard is restored and `xdotool` sends only the paste chord
 - continuous multi-point drawing gestures for handwriting, curves, and lassos
 - focus-verified, window-relative drawing paths that reject out-of-bounds
   points before sending any input
@@ -31,7 +33,27 @@ Window move/resize behavior is backend-specific:
 
 ## Runtime Dependencies
 
-Install `ydotool` when you need the fallback input path:
+On X11, install `xdotool` for reliable full-Unicode text entry. It sends a
+modifier-clean paste chord while the Rust backend temporarily owns the X11
+clipboard selection; it is not used to store or retrieve the text itself:
+
+```bash
+# Debian / Ubuntu
+sudo apt install xdotool
+
+# Fedora
+sudo dnf install xdotool
+
+# Arch / Manjaro
+sudo pacman -S xdotool
+
+# openSUSE
+sudo zypper install xdotool
+```
+
+If `xdotool` is absent, X11 text entry falls back safely to the regular
+keyboard backend before changing the clipboard. Install `ydotool` when you
+need that global fallback input path for keyboard and pointer actions:
 
 ```bash
 # Debian / Ubuntu

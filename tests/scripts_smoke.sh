@@ -2728,6 +2728,7 @@ SCRIPT
         bash "$REPO_DIR/scripts/bootstrap-wizard.sh" >"$output_log"
 
     assert_contains "$output_log" "Installed package: deb 1.2.3"
+    assert_contains "$output_log" "Computer Use readiness: xdotool="
     assert_contains "$output_log" "ydotoold.service(system)="
     assert_contains "$output_log" "ydotoold.service(user)="
     assert_contains "$dpkg_args" "codex-cua-lab"
@@ -3024,6 +3025,7 @@ test_setup_native_wizard_prints_deep_readiness_guidance() {
     assert_contains "$output_log" "uinput="
     assert_contains "$output_log" "current user in input group="
     assert_contains "$output_log" "Window backend hint: KDE/Plasma -> KWin"
+    assert_contains "$output_log" "Suggested X11 Unicode paste command:"
     assert_contains "$output_log" "Suggested ydotool command:"
     assert_contains "$output_log" "Suggested portal package:"
     assert_contains "$output_log" "Read Aloud readiness:"
