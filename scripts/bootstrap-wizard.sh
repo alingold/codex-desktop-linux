@@ -16,6 +16,7 @@ COLOR_RED=""
 COLOR_YELLOW=""
 COLOR_CYAN=""
 COLOR_GREEN=""
+NATIVE_INSTALL_COMPLETED=0
 
 info() {
     echo "${COLOR_DIM}[setup]${COLOR_RESET} $*"
@@ -56,6 +57,12 @@ Environment:
   CODEX_BOOTSTRAP_DRY_RUN=1            preview install/cleanup actions without changing them
   CODEX_BOOTSTRAP_INSTALL_DEPS=1       run bash scripts/install-deps.sh after checks
   CODEX_BOOTSTRAP_INSTALL_NATIVE=1     run make install-native after checks
+  CODEX_BOOTSTRAP_COMPUTER_USE_UI=1|0  persistently enable or disable the in-app Computer Use UI
+  CODEX_BOOTSTRAP_RUN_COMPUTER_USE_DOCTOR=1|0
+                                        run or skip the read-only Computer Use doctor
+  CODEX_BOOTSTRAP_DOCTOR_TIMEOUT=15    doctor timeout in seconds (1-300)
+  CODEX_BOOTSTRAP_COMPUTER_USE_BIN=/path
+                                        override the Computer Use backend used by doctor
   CODEX_BOOTSTRAP_CLEANUP_FEATURES=a,b cleanup feature-owned data with confirmation
   CODEX_BOOTSTRAP_COLOR=auto|1|0       enable ANSI color automatically, force it, or disable it
   CODEX_LINUX_FEATURES=a,b             enable build-time Linux features
@@ -354,6 +361,10 @@ window_backend_hint() {
         printf 'KDE/Plasma -> KWin scripting backend'
     elif [[ "$desktop" == *gnome* ]]; then
         printf 'GNOME -> Shell Introspect plus optional bundled extension for exact activation'
+    elif [[ "$desktop" == *cinnamon* || "$desktop" == *mate* || "$desktop" == *xfce* || "$desktop" == *lxde* || "$desktop" == *lxqt* ]]; then
+        printf '%s -> EWMH X11 backend for listing, exact focus, move, and resize' "${XDG_CURRENT_DESKTOP:-${DESKTOP_SESSION:-X11 desktop}}"
+    elif [ "${XDG_SESSION_TYPE:-}" = "x11" ] || { [ -n "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; }; then
+        printf 'X11 session -> EWMH backend when the window manager publishes _NET_CLIENT_LIST'
     else
         printf 'unknown desktop -> screenshots, AT-SPI, and global ydotool may still work'
     fi
@@ -361,9 +372,18 @@ window_backend_hint() {
 
 computer_use_doctor_path() {
     local candidate
+    if [ -n "${CODEX_BOOTSTRAP_COMPUTER_USE_BIN:-}" ]; then
+        if [ -x "$CODEX_BOOTSTRAP_COMPUTER_USE_BIN" ]; then
+            printf '%s\n' "$CODEX_BOOTSTRAP_COMPUTER_USE_BIN"
+            return
+        fi
+        return 1
+    fi
+
     for candidate in \
-        "$REPO_DIR/codex-app/resources/plugins/openai-bundled/plugins/computer-use/bin/codex-computer-use-linux" \
         "/opt/$PACKAGE_NAME/resources/plugins/openai-bundled/plugins/computer-use/bin/codex-computer-use-linux" \
+        "$REPO_DIR/codex-app/resources/plugins/openai-bundled/plugins/computer-use/bin/codex-computer-use-linux" \
+        "${CODEX_HOME:-$HOME/.codex}/plugins/cache/openai-bundled/computer-use/latest/bin/codex-computer-use-linux" \
         "$(command -v codex-computer-use-linux 2>/dev/null || true)"; do
         [ -n "$candidate" ] || continue
         if [ -x "$candidate" ]; then
@@ -371,6 +391,24 @@ computer_use_doctor_path() {
             return
         fi
     done
+
+    local cache_root="${CODEX_HOME:-$HOME/.codex}/plugins/cache/openai-bundled/computer-use"
+    local newest_cache=""
+    local newest_mtime=-1
+    local candidate_mtime
+    for candidate in "$cache_root"/*/bin/codex-computer-use-linux; do
+        if [ -x "$candidate" ]; then
+            candidate_mtime="$(stat -c '%Y' "$candidate" 2>/dev/null || printf 0)"
+            if [ "$candidate_mtime" -gt "$newest_mtime" ]; then
+                newest_cache="$candidate"
+                newest_mtime="$candidate_mtime"
+            fi
+        fi
+    done
+    if [ -n "$newest_cache" ]; then
+        printf '%s\n' "$newest_cache"
+        return
+    fi
     return 1
 }
 
@@ -386,6 +424,165 @@ settings_file_path() {
                 ;;
         esac
         printf '%s\n' "$config_home/$app_id/settings.json"
+    fi
+}
+
+computer_use_ui_state() {
+    local settings_path
+    settings_path="$(settings_file_path)"
+    if [ ! -e "$settings_path" ]; then
+        printf 'not configured'
+        return
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        printf 'unknown (python3 missing)'
+        return
+    fi
+
+    python3 - "$settings_path" <<'PY' 2>/dev/null || printf 'invalid settings file'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+except Exception:
+    raise SystemExit(1)
+
+if not isinstance(data, dict):
+    raise SystemExit(1)
+
+value = data.get("codex-linux-computer-use-ui-enabled")
+if value is True:
+    print("enabled", end="")
+elif value is False:
+    print("disabled", end="")
+else:
+    print("not configured", end="")
+PY
+}
+
+write_computer_use_ui_setting() {
+    local enabled="$1"
+    local settings_path
+    settings_path="$(settings_file_path)"
+
+    command -v python3 >/dev/null 2>&1 || error "python3 is required to update the Computer Use UI setting."
+
+    if ! python3 - "$settings_path" "$enabled" "$(dry_run_enabled && printf 1 || printf 0)" <<'PY'
+import json
+import os
+import pathlib
+import stat
+import sys
+import tempfile
+
+path = pathlib.Path(sys.argv[1])
+enabled = sys.argv[2] == "1"
+dry_run = sys.argv[3] == "1"
+key = "codex-linux-computer-use-ui-enabled"
+
+data = {}
+existing_mode = None
+if path.is_symlink():
+    # Preserve a user's managed settings symlink by writing its target rather
+    # than replacing the link itself.
+    try:
+        path = path.resolve(strict=False)
+    except OSError as exc:
+        print(f"[setup][ERROR] Could not resolve settings symlink {path}: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+
+if path.exists():
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"[setup][ERROR] Refusing to overwrite malformed settings file {path}: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+    if not isinstance(data, dict):
+        print(f"[setup][ERROR] Refusing to overwrite non-object settings file {path}", file=sys.stderr)
+        raise SystemExit(1)
+    existing_mode = stat.S_IMODE(path.stat().st_mode)
+data[key] = enabled
+state = "true" if enabled else "false"
+if dry_run:
+    print(f"[setup] Would set {key}={state} in {path}")
+    raise SystemExit(0)
+
+path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+try:
+    os.fchmod(fd, existing_mode if existing_mode is not None else 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)
+        fh.write("\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(temporary_name, path)
+    try:
+        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError:
+        pass
+except BaseException:
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+    try:
+        os.unlink(temporary_name)
+    except FileNotFoundError:
+        pass
+    raise
+
+print(f"[setup] Set {key}={state} in {path}")
+PY
+    then
+        error "Computer Use UI setting was not changed. Repair the settings file above and retry."
+    fi
+}
+
+configure_computer_use_ui() {
+    local state settings_path requested=""
+    state="$(computer_use_ui_state)"
+    settings_path="$(settings_file_path)"
+    info "In-app Computer Use UI: $state ($settings_path)"
+
+    if [ -n "${CODEX_BOOTSTRAP_COMPUTER_USE_UI+x}" ]; then
+        if truthy "${CODEX_BOOTSTRAP_COMPUTER_USE_UI:-}"; then
+            requested=1
+        elif falsy "${CODEX_BOOTSTRAP_COMPUTER_USE_UI:-}"; then
+            requested=0
+        else
+            error "CODEX_BOOTSTRAP_COMPUTER_USE_UI must be 1 or 0"
+        fi
+    elif ! noninteractive_mode; then
+        local answer=""
+        if [ "$state" = "enabled" ]; then
+            prompt_read answer "[setup] Keep the in-app Computer Use UI enabled? [Y/n]: " || true
+            case "$answer" in
+                n|N|no|No|NO) requested=0 ;;
+            esac
+        else
+            prompt_read answer "[setup] Enable the opt-in Computer Use UI for the next build? [y/N]: " || true
+            case "$answer" in
+                y|Y|yes|Yes|YES) requested=1 ;;
+            esac
+        fi
+    fi
+
+    if [ -n "$requested" ]; then
+        write_computer_use_ui_setting "$requested"
+        if [ "$requested" = "1" ]; then
+            info "Computer Use UI opt-in will apply after the next build/reinstall; it does not bypass upstream server-side availability."
+        else
+            info "Computer Use UI opt-out will apply after the next build/reinstall."
+        fi
+    elif noninteractive_mode; then
+        info "Set CODEX_BOOTSTRAP_COMPUTER_USE_UI=1 or 0 to change this setting without prompts."
     fi
 }
 
@@ -501,6 +698,7 @@ print_computer_use_details() {
     doctor="$(computer_use_doctor_path 2>/dev/null || true)"
 
     info "Computer Use details:"
+    info "  In-app UI setting: $(computer_use_ui_state) ($(settings_file_path))"
     info "  uinput=$(uinput_summary)"
     info "  current user in input group=$(input_group_summary)"
     info "  Window backend hint: $(window_backend_hint)"
@@ -514,6 +712,185 @@ print_computer_use_details() {
     else
         info "  Computer Use doctor command: build/install first, then run codex-computer-use-linux doctor from the staged plugin."
     fi
+}
+
+run_computer_use_doctor() {
+    local doctor="$1"
+    local timeout_seconds="${CODEX_BOOTSTRAP_DOCTOR_TIMEOUT:-15}"
+
+    case "$timeout_seconds" in
+        ''|*[!0-9]*)
+            error "CODEX_BOOTSTRAP_DOCTOR_TIMEOUT must be an integer from 1 to 300"
+            ;;
+    esac
+    if [ "$timeout_seconds" -lt 1 ] || [ "$timeout_seconds" -gt 300 ]; then
+        error "CODEX_BOOTSTRAP_DOCTOR_TIMEOUT must be an integer from 1 to 300"
+    fi
+    command -v python3 >/dev/null 2>&1 || {
+        warn "Cannot run the bounded Computer Use doctor because python3 is missing."
+        return 0
+    }
+
+    info "Running read-only Computer Use doctor (timeout ${timeout_seconds}s): $doctor doctor"
+    local records
+    records="$(python3 - "$doctor" "$timeout_seconds" <<'PY'
+import json
+import subprocess
+import sys
+
+binary = sys.argv[1]
+timeout_seconds = int(sys.argv[2])
+
+def clean(value):
+    return " ".join(str(value).replace("\t", " ").splitlines()).strip()
+
+def record(kind, value):
+    print(f"{kind}\t{clean(value)}")
+
+try:
+    completed = subprocess.run(
+        [binary, "doctor"],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        timeout=timeout_seconds,
+        check=False,
+    )
+except subprocess.TimeoutExpired:
+    record("error", f"timed out after {timeout_seconds}s")
+    raise SystemExit(0)
+except OSError as exc:
+    record("error", f"could not start doctor: {exc}")
+    raise SystemExit(0)
+except Exception as exc:
+    record("error", f"doctor execution failed: {exc}")
+    raise SystemExit(0)
+
+stdout = completed.stdout.decode("utf-8", errors="replace")
+stderr = completed.stderr.decode("utf-8", errors="replace")
+
+if completed.returncode != 0:
+    detail = stderr.strip() or stdout.strip() or "no diagnostic output"
+    record("error", f"doctor exited {completed.returncode}: {detail[:400]}")
+    raise SystemExit(0)
+
+try:
+    report = json.loads(stdout)
+except Exception as exc:
+    record("error", f"doctor returned invalid JSON: {exc}")
+    raise SystemExit(0)
+
+if not isinstance(report, dict) or not isinstance(report.get("readiness"), dict):
+    record("error", "doctor JSON is missing the readiness object")
+    raise SystemExit(0)
+
+readiness = report["readiness"]
+capabilities = report.get("capabilities") if isinstance(report.get("capabilities"), dict) else {}
+preferred = capabilities.get("preferred") if isinstance(capabilities.get("preferred"), dict) else {}
+
+checks = {
+    "mcp": readiness.get("can_register_mcp_tools") is True,
+    "accessibility": readiness.get("can_build_accessibility_tree") is True,
+    "windows": readiness.get("can_query_windows") is True,
+    "app_focus": readiness.get("can_focus_apps") is True,
+    "exact_focus": readiness.get("can_focus_windows") is True,
+    "input": readiness.get("can_send_development_input") is True,
+    "screenshot": bool(preferred.get("screenshot")),
+}
+blockers = [clean(item) for item in readiness.get("blockers", []) if clean(item)] \
+    if isinstance(readiness.get("blockers"), list) else []
+if not checks["screenshot"]:
+    blockers.append("No screenshot backend was detected; install or enable the desktop portal or a supported compositor screenshot backend.")
+
+record("status", "READY" if all(checks.values()) and not blockers else "DEGRADED")
+record("capabilities", " ".join(f"{name}={'yes' if ready else 'no'}" for name, ready in checks.items()))
+record(
+    "backends",
+    " ".join(
+        f"{name}={preferred.get(name) or 'none'}"
+        for name in ("input", "screenshot", "window_control")
+    ),
+)
+for blocker in blockers:
+    record("blocker", blocker)
+next_step = readiness.get("recommended_next_step")
+if next_step:
+    record("next", next_step)
+PY
+)"
+
+    local kind detail
+    while IFS=$'\t' read -r kind detail; do
+        case "$kind" in
+            status)
+                if [ "$detail" = "READY" ]; then
+                    info "Computer Use doctor result: READY"
+                else
+                    warn "Computer Use doctor result: DEGRADED"
+                fi
+                ;;
+            capabilities)
+                info "  Capabilities: $detail"
+                ;;
+            backends)
+                info "  Preferred backends: $detail"
+                ;;
+            blocker)
+                warn "  Blocker: $detail"
+                ;;
+            next)
+                info "  Recommended next step: $detail"
+                ;;
+            error)
+                warn "Computer Use doctor could not complete: $detail"
+                ;;
+        esac
+    done <<< "$records"
+}
+
+maybe_run_computer_use_doctor() {
+    local should_run=0
+    local doctor=""
+    doctor="$(computer_use_doctor_path 2>/dev/null || true)"
+
+    if [ -n "${CODEX_BOOTSTRAP_RUN_COMPUTER_USE_DOCTOR+x}" ]; then
+        if truthy "${CODEX_BOOTSTRAP_RUN_COMPUTER_USE_DOCTOR:-}"; then
+            should_run=1
+        elif ! falsy "${CODEX_BOOTSTRAP_RUN_COMPUTER_USE_DOCTOR:-}"; then
+            error "CODEX_BOOTSTRAP_RUN_COMPUTER_USE_DOCTOR must be 1 or 0"
+        fi
+    elif [ "$NATIVE_INSTALL_COMPLETED" = "1" ]; then
+        # A read-only verification is a normal completion step after the user
+        # explicitly opted into a native install.
+        should_run=1
+    elif ! noninteractive_mode && [ -n "$doctor" ]; then
+        local answer=""
+        prompt_read answer "[setup] Run the read-only Computer Use doctor now? [Y/n]: " || true
+        case "$answer" in
+            n|N|no|No|NO) ;;
+            *) should_run=1 ;;
+        esac
+    fi
+
+    if [ "$should_run" != "1" ]; then
+        if [ -z "$doctor" ]; then
+            info "After installing, verify Computer Use with: CODEX_BOOTSTRAP_RUN_COMPUTER_USE_DOCTOR=1 make setup-native"
+        fi
+        return 0
+    fi
+
+    if [ -z "$doctor" ]; then
+        if [ -n "${CODEX_BOOTSTRAP_COMPUTER_USE_BIN:-}" ]; then
+            warn "Computer Use backend override is not executable: $CODEX_BOOTSTRAP_COMPUTER_USE_BIN"
+        fi
+        warn "Computer Use doctor requested, but no installed, staged, cached, or PATH backend was found."
+        info "Build/install first, then rerun: CODEX_BOOTSTRAP_RUN_COMPUTER_USE_DOCTOR=1 make setup-native"
+        return 0
+    fi
+    if dry_run_enabled; then
+        info "Would run read-only Computer Use doctor: $doctor doctor"
+        return 0
+    fi
+    run_computer_use_doctor "$doctor"
 }
 
 installed_package_version() {
@@ -1028,6 +1405,7 @@ run_install_native_step() {
         else
             info 'Running: PATH="$HOME/.cargo/bin:$PATH" make install-native'
             (cd "$REPO_DIR" && PATH="$HOME/.cargo/bin:$PATH" make install-native)
+            NATIVE_INSTALL_COMPLETED=1
         fi
     else
         if dry_run_enabled; then
@@ -1035,6 +1413,7 @@ run_install_native_step() {
         else
             info 'Running: PATH="$HOME/.cargo/bin:$PATH" PACKAGE_WITH_UPDATER=0 make install-native'
             (cd "$REPO_DIR" && PATH="$HOME/.cargo/bin:$PATH" PACKAGE_WITH_UPDATER=0 make install-native)
+            NATIVE_INSTALL_COMPLETED=1
         fi
     fi
 }
@@ -1240,12 +1619,14 @@ main() {
     section "Linux Features"
     prompt_for_feature_changes
     section "Readiness"
+    configure_computer_use_ui
     print_computer_use_details
     print_read_aloud_details
     run_feature_cleanup
     section "Next Steps"
     print_package_mode_guidance
     maybe_run_install_steps
+    maybe_run_computer_use_doctor
     if dry_run_enabled; then
         info "Dry-run completed."
     else

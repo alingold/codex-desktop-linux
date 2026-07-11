@@ -20,6 +20,15 @@ It supports:
 - application-focused X11 discovery that omits desktop, dock, notification,
   splash, and taskbar/pager-hidden utility surfaces
 
+Window move/resize behavior is backend-specific:
+
+- KWin applies requested frame geometry and verifies the resulting bounds
+- Hyprland dispatches exact pixel geometry and verifies the result
+- i3 applies exact geometry only when the current layout/container permits it,
+  which normally means a floating window
+- the COSMIC helper currently has no window-geometry protocol, so move/resize
+  remains unavailable there
+
 ## Runtime Dependencies
 
 Install `ydotool` when you need the fallback input path:
@@ -80,6 +89,20 @@ You can also run the backend directly:
 ./codex-app/resources/plugins/openai-bundled/plugins/computer-use/bin/codex-computer-use-linux screenshot
 ```
 
+The guided setup can discover an installed, staged, cached, or `PATH` backend,
+run the doctor with a bounded timeout, and reduce its JSON report to a
+ready/degraded checklist:
+
+```bash
+CODEX_BOOTSTRAP_RUN_COMPUTER_USE_DOCTOR=1 make setup-native
+```
+
+This verification is read-only. It does not run the mutating `setup` or
+`setup-window-targeting` commands, install packages, start services, or change
+device/group permissions. A `READY` result requires accessibility, window
+querying, exact focus, input, and a screenshot backend; `DEGRADED` includes the
+detected blockers and recommended next step.
+
 ## Enable The In-App UI
 
 Ad hoc, for one build:
@@ -91,12 +114,20 @@ CODEX_LINUX_ENABLE_COMPUTER_USE_UI=1 make build-app
 Persistent, including future auto-updater rebuilds:
 
 ```bash
-mkdir -p ~/.config/codex-desktop
-echo '{"codex-linux-computer-use-ui-enabled": true}' > ~/.config/codex-desktop/settings.json
+CODEX_BOOTSTRAP_COMPUTER_USE_UI=1 make setup-native
 ```
 
-To opt back out, unset the env var and remove the settings flag or set it to
-`false`.
+This validates and atomically merges the flag into the app's `settings.json`,
+preserving unrelated settings. It refuses to overwrite malformed JSON. To opt
+back out persistently:
+
+```bash
+CODEX_BOOTSTRAP_COMPUTER_USE_UI=0 make setup-native
+```
+
+Unset the ad-hoc build environment variable as well if you used it. Persistent
+UI changes apply after rebuilding/reinstalling and do not bypass unrelated
+upstream server-side availability.
 
 Nix:
 
