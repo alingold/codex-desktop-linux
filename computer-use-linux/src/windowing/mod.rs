@@ -6,7 +6,7 @@ pub mod types;
 #[allow(unused_imports)]
 pub use registry::{
     COSMIC_WAYLAND_BACKEND, GNOME_SHELL_EXTENSION_BACKEND, GNOME_SHELL_INTROSPECT_BACKEND,
-    HYPRLAND_BACKEND, I3_BACKEND, KWIN_BACKEND, WINDOW_PERMISSION_HINT,
+    HYPRLAND_BACKEND, I3_BACKEND, KWIN_BACKEND, WINDOW_PERMISSION_HINT, X11_EWMH_BACKEND,
 };
 #[allow(unused_imports)]
 pub use target::{
@@ -22,12 +22,12 @@ mod tests {
     use super::backends::hyprland::{parse_hyprland_clients, HYPRLAND_BACKEND};
     use super::backends::i3::{parse_i3_tree, parse_xprop_pid, I3_BACKEND};
     use super::backends::kwin::{
-        kwin_activate_script_source, kwin_window_id_from_uuid, kwin_window_script_source,
-        parse_kwin_windows, KWIN_BACKEND,
+        kwin_activate_script_source, kwin_move_script_source, kwin_resize_script_source,
+        kwin_window_id_from_uuid, kwin_window_script_source, parse_kwin_windows, KWIN_BACKEND,
     };
     use super::registry::{
         descriptors, list_note, COSMIC_WAYLAND_BACKEND, GNOME_SHELL_EXTENSION_BACKEND,
-        GNOME_SHELL_INTROSPECT_BACKEND,
+        GNOME_SHELL_INTROSPECT_BACKEND, X11_EWMH_BACKEND,
     };
     use super::target::ensure_backend_can_focus_target;
     use super::*;
@@ -56,6 +56,7 @@ mod tests {
                 KWIN_BACKEND,
                 HYPRLAND_BACKEND,
                 I3_BACKEND,
+                X11_EWMH_BACKEND,
             ]
         );
     }
@@ -227,6 +228,21 @@ mod tests {
     fn i3_backend_can_exact_focus_targets() {
         let mut window = window(2, "Codex", "codex-desktop", "codex-desktop");
         window.backend = I3_BACKEND.to_string();
+
+        ensure_backend_can_focus_target(
+            &WindowTarget {
+                title: Some("Codex".to_string()),
+                ..Default::default()
+            },
+            &window,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn x11_backend_can_exact_focus_targets() {
+        let mut window = window(2, "Codex", "codex-desktop", "codex-desktop");
+        window.backend = X11_EWMH_BACKEND.to_string();
 
         ensure_backend_can_focus_target(
             &WindowTarget {
@@ -735,6 +751,46 @@ mod tests {
         assert!(script.contains("workspace.activeClient = targetWindow;"));
         assert!(script.contains(r#""ReceiveResult""#));
         assert!(!script.contains("WindowsRunner"));
+    }
+
+    #[test]
+    fn kwin_move_script_sets_and_verifies_exact_frame_position() {
+        let script = kwin_move_script_source(
+            ":1.234",
+            "/com/openai/Codex/KWinWindowQuery/test",
+            "codex_kwin_window_query_test",
+            "{B4DFACF8-A559-43C9-8B1F-ECD5CFD78359}",
+            -120,
+            80,
+        )
+        .unwrap();
+
+        assert!(script.contains(r#"var operation = "move";"#));
+        assert!(script.contains(r#"var requested = {x: -120, y: 80, width: null, height: null};"#));
+        assert!(script.contains("targetWindow.frameGeometry = desired;"));
+        assert!(script.contains("closeEnough(actual.x, requested.x)"));
+        assert!(script.contains("window.setMaximize(false, false);"));
+        assert!(script.contains(r#"window.tile = null;"#));
+        assert!(script.contains(r#""ReceiveResult""#));
+    }
+
+    #[test]
+    fn kwin_resize_script_sets_and_verifies_exact_frame_size() {
+        let script = kwin_resize_script_source(
+            ":1.234",
+            "/com/openai/Codex/KWinWindowQuery/test",
+            "codex_kwin_window_query_test",
+            "b4dfacf8-a559-43c9-8b1f-ecd5cfd78359",
+            1280,
+            720,
+        )
+        .unwrap();
+
+        assert!(script.contains(r#"var operation = "resize";"#));
+        assert!(script.contains(r#"var requested = {x: null, y: null, width: 1280, height: 720};"#));
+        assert!(script.contains("closeEnough(actual.width, requested.width)"));
+        assert!(script.contains(r#"read(targetWindow, "resizeable") === false"#));
+        assert!(script.contains("actual: actual"));
     }
 
     #[test]

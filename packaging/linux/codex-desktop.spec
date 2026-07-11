@@ -23,7 +23,7 @@ Requires:       libpango-1.0.so.0%{codex_elf_suffix}, libstdc++.so.6%{codex_elf_
 Requires:       libxcb.so.1%{codex_elf_suffix}, libXcomposite.so.1%{codex_elf_suffix}, libXdamage.so.1%{codex_elf_suffix}
 Requires:       libXext.so.6%{codex_elf_suffix}, libXfixes.so.3%{codex_elf_suffix}, libxkbcommon.so.0%{codex_elf_suffix}
 Requires:       libXrandr.so.2%{codex_elf_suffix}, libgbm.so.1%{codex_elf_suffix}
-Recommends:     zenity, kdialog
+Recommends:     zenity, kdialog, xdotool
 
 %description
 Community-built Linux package for ChatGPT Desktop generated from the macOS DMG.

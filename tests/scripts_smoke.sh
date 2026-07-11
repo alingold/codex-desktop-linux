@@ -2597,6 +2597,8 @@ test_setup_native_wizard_accepts_numbered_feature_selection() {
     (
         export HOME="$fake_home"
         export XDG_CONFIG_HOME="$fake_home/.config"
+        export CODEX_BOOTSTRAP_COMPUTER_USE_UI=0
+        export CODEX_BOOTSTRAP_RUN_COMPUTER_USE_DOCTOR=0
         export CODEX_LINUX_FEATURES_ROOT="$features_root"
         export CODEX_LINUX_FEATURES_CONFIG="$config"
         {
@@ -2726,6 +2728,7 @@ SCRIPT
         bash "$REPO_DIR/scripts/bootstrap-wizard.sh" >"$output_log"
 
     assert_contains "$output_log" "Installed package: deb 1.2.3"
+    assert_contains "$output_log" "Computer Use readiness: xdotool="
     assert_contains "$output_log" "ydotoold.service(system)="
     assert_contains "$output_log" "ydotoold.service(user)="
     assert_contains "$dpkg_args" "codex-cua-lab"
@@ -2808,6 +2811,191 @@ test_setup_native_wizard_dry_runs_deps_and_install_native() {
     assert_contains "$output_log" "Dry-run mode: no dependency install or native package install command was executed."
 }
 
+test_setup_native_wizard_persists_computer_use_ui_safely() {
+    info "Checking setup-native wizard safely persists the Computer Use UI opt-in"
+    local workspace="$TMP_DIR/setup-native-computer-use-ui"
+    local features_root="$workspace/linux-features"
+    local config="$workspace/features.json"
+    local settings="$workspace/config/codex-cua-lab/settings.json"
+    local managed_settings="$workspace/managed/settings.json"
+    local output_log="$workspace/output.log"
+
+    make_wizard_feature_root "$features_root"
+    printf '%s\n' '{"enabled":[]}' > "$config"
+    mkdir -p "$(dirname "$settings")"
+    printf '%s\n' '{"unrelated":{"nested":true},"codex-linux-system-tray-enabled":true}' > "$settings"
+    chmod 0640 "$settings"
+
+    CODEX_BOOTSTRAP_NONINTERACTIVE=1 \
+    CODEX_BOOTSTRAP_COMPUTER_USE_UI=1 \
+    CODEX_BOOTSTRAP_RUN_COMPUTER_USE_DOCTOR=0 \
+    CODEX_LINUX_SETTINGS_FILE="$settings" \
+    CODEX_LINUX_FEATURES_ROOT="$features_root" \
+    CODEX_LINUX_FEATURES_CONFIG="$config" \
+        bash "$REPO_DIR/scripts/bootstrap-wizard.sh" >"$output_log"
+
+    node - "$settings" <<'NODE' || fail "Expected Computer Use UI writer to preserve unrelated settings"
+const fs = require("node:fs");
+const settings = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (settings["codex-linux-computer-use-ui-enabled"] !== true ||
+    settings["codex-linux-system-tray-enabled"] !== true ||
+    settings.unrelated?.nested !== true) {
+  process.exit(1);
+}
+NODE
+    assert_mode "$settings" 640
+    assert_contains "$output_log" "Set codex-linux-computer-use-ui-enabled=true"
+    assert_contains "$output_log" "does not bypass upstream server-side availability"
+
+    CODEX_BOOTSTRAP_NONINTERACTIVE=1 \
+    CODEX_BOOTSTRAP_COMPUTER_USE_UI=0 \
+    CODEX_BOOTSTRAP_RUN_COMPUTER_USE_DOCTOR=0 \
+    CODEX_LINUX_SETTINGS_FILE="$settings" \
+    CODEX_LINUX_FEATURES_ROOT="$features_root" \
+    CODEX_LINUX_FEATURES_CONFIG="$config" \
+        bash "$REPO_DIR/scripts/bootstrap-wizard.sh" >"$output_log"
+
+    node - "$settings" <<'NODE' || fail "Expected Computer Use UI writer to persist opt-out"
+const fs = require("node:fs");
+const settings = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (settings["codex-linux-computer-use-ui-enabled"] !== false || settings.unrelated?.nested !== true) {
+  process.exit(1);
+}
+NODE
+
+    mkdir -p "$(dirname "$managed_settings")"
+    mv "$settings" "$managed_settings"
+    ln -s "$managed_settings" "$settings"
+    CODEX_BOOTSTRAP_NONINTERACTIVE=1 \
+    CODEX_BOOTSTRAP_COMPUTER_USE_UI=1 \
+    CODEX_BOOTSTRAP_RUN_COMPUTER_USE_DOCTOR=0 \
+    CODEX_LINUX_SETTINGS_FILE="$settings" \
+    CODEX_LINUX_FEATURES_ROOT="$features_root" \
+    CODEX_LINUX_FEATURES_CONFIG="$config" \
+        bash "$REPO_DIR/scripts/bootstrap-wizard.sh" >"$output_log"
+
+    [ -L "$settings" ] || fail "Computer Use UI writer replaced the managed settings symlink"
+    node - "$managed_settings" <<'NODE' || fail "Expected Computer Use UI writer to update a managed settings target"
+const fs = require("node:fs");
+const settings = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (settings["codex-linux-computer-use-ui-enabled"] !== true || settings.unrelated?.nested !== true) {
+  process.exit(1);
+}
+NODE
+}
+
+test_setup_native_wizard_computer_use_ui_dry_run_and_malformed_guard() {
+    info "Checking Computer Use UI dry-run and malformed settings guard"
+    local workspace="$TMP_DIR/setup-native-computer-use-ui-guards"
+    local features_root="$workspace/linux-features"
+    local config="$workspace/features.json"
+    local settings="$workspace/settings.json"
+    local output_log="$workspace/output.log"
+    local before_hash
+
+    make_wizard_feature_root "$features_root"
+    printf '%s\n' '{"enabled":[]}' > "$config"
+    printf '%s\n' '{"codex-linux-computer-use-ui-enabled":true,"keep":"value"}' > "$settings"
+    before_hash="$(sha256sum "$settings" | awk '{print $1}')"
+
+    CODEX_BOOTSTRAP_NONINTERACTIVE=1 \
+    CODEX_BOOTSTRAP_DRY_RUN=1 \
+    CODEX_BOOTSTRAP_COMPUTER_USE_UI=0 \
+    CODEX_BOOTSTRAP_RUN_COMPUTER_USE_DOCTOR=0 \
+    CODEX_LINUX_SETTINGS_FILE="$settings" \
+    CODEX_LINUX_FEATURES_ROOT="$features_root" \
+    CODEX_LINUX_FEATURES_CONFIG="$config" \
+        bash "$REPO_DIR/scripts/bootstrap-wizard.sh" >"$output_log"
+
+    [ "$(sha256sum "$settings" | awk '{print $1}')" = "$before_hash" ] \
+        || fail "Computer Use UI dry-run changed settings.json"
+    assert_contains "$output_log" "Would set codex-linux-computer-use-ui-enabled=false"
+
+    printf '%s\n' '{malformed' > "$settings"
+    before_hash="$(sha256sum "$settings" | awk '{print $1}')"
+    if CODEX_BOOTSTRAP_NONINTERACTIVE=1 \
+        CODEX_BOOTSTRAP_COMPUTER_USE_UI=1 \
+        CODEX_BOOTSTRAP_RUN_COMPUTER_USE_DOCTOR=0 \
+        CODEX_LINUX_SETTINGS_FILE="$settings" \
+        CODEX_LINUX_FEATURES_ROOT="$features_root" \
+        CODEX_LINUX_FEATURES_CONFIG="$config" \
+            bash "$REPO_DIR/scripts/bootstrap-wizard.sh" >"$output_log" 2>&1; then
+        fail "Computer Use UI writer should reject malformed settings JSON"
+    fi
+
+    [ "$(sha256sum "$settings" | awk '{print $1}')" = "$before_hash" ] \
+        || fail "Computer Use UI writer overwrote malformed settings.json"
+    assert_contains "$output_log" "Refusing to overwrite malformed settings file"
+}
+
+test_setup_native_wizard_runs_bounded_computer_use_doctor() {
+    info "Checking setup-native wizard bounded Computer Use doctor summary"
+    local workspace="$TMP_DIR/setup-native-computer-use-doctor"
+    local features_root="$workspace/linux-features"
+    local config="$workspace/features.json"
+    local doctor="$workspace/codex-computer-use-linux"
+    local output_log="$workspace/output.log"
+
+    make_wizard_feature_root "$features_root"
+    printf '%s\n' '{"enabled":[]}' > "$config"
+    cat > "$doctor" <<'SCRIPT'
+#!/usr/bin/env bash
+[ "${1:-}" = "doctor" ] || exit 2
+cat <<'JSON'
+{
+  "readiness": {
+    "can_register_mcp_tools": true,
+    "can_build_accessibility_tree": true,
+    "can_query_windows": true,
+    "can_focus_apps": true,
+    "can_focus_windows": true,
+    "can_send_development_input": true,
+    "recommended_next_step": "Computer Use is ready.",
+    "blockers": []
+  },
+  "capabilities": {
+    "preferred": {
+      "input": "ydotool",
+      "screenshot": "portal",
+      "window_control": "x11_ewmh"
+    }
+  }
+}
+JSON
+SCRIPT
+    chmod +x "$doctor"
+
+    CODEX_BOOTSTRAP_NONINTERACTIVE=1 \
+    CODEX_BOOTSTRAP_RUN_COMPUTER_USE_DOCTOR=1 \
+    CODEX_BOOTSTRAP_DOCTOR_TIMEOUT=2 \
+    CODEX_BOOTSTRAP_COMPUTER_USE_BIN="$doctor" \
+    CODEX_LINUX_SETTINGS_FILE="$workspace/settings.json" \
+    CODEX_LINUX_FEATURES_ROOT="$features_root" \
+    CODEX_LINUX_FEATURES_CONFIG="$config" \
+        bash "$REPO_DIR/scripts/bootstrap-wizard.sh" >"$output_log" 2>&1
+
+    assert_contains "$output_log" "Computer Use doctor result: READY"
+    assert_contains "$output_log" "accessibility=yes windows=yes app_focus=yes exact_focus=yes input=yes screenshot=yes"
+    assert_contains "$output_log" "input=ydotool screenshot=portal window_control=x11_ewmh"
+
+    cat > "$doctor" <<'SCRIPT'
+#!/usr/bin/env bash
+sleep 5
+SCRIPT
+    chmod +x "$doctor"
+
+    CODEX_BOOTSTRAP_NONINTERACTIVE=1 \
+    CODEX_BOOTSTRAP_RUN_COMPUTER_USE_DOCTOR=1 \
+    CODEX_BOOTSTRAP_DOCTOR_TIMEOUT=1 \
+    CODEX_BOOTSTRAP_COMPUTER_USE_BIN="$doctor" \
+    CODEX_LINUX_SETTINGS_FILE="$workspace/settings.json" \
+    CODEX_LINUX_FEATURES_ROOT="$features_root" \
+    CODEX_LINUX_FEATURES_CONFIG="$config" \
+        timeout 4 bash "$REPO_DIR/scripts/bootstrap-wizard.sh" >"$output_log" 2>&1
+
+    assert_contains "$output_log" "Computer Use doctor could not complete: timed out after 1s"
+}
+
 test_setup_native_wizard_prints_deep_readiness_guidance() {
     info "Checking setup-native wizard detailed Computer Use and Read Aloud readiness"
     local workspace="$TMP_DIR/setup-native-readiness"
@@ -2837,6 +3025,7 @@ test_setup_native_wizard_prints_deep_readiness_guidance() {
     assert_contains "$output_log" "uinput="
     assert_contains "$output_log" "current user in input group="
     assert_contains "$output_log" "Window backend hint: KDE/Plasma -> KWin"
+    assert_contains "$output_log" "Suggested X11 Unicode paste command:"
     assert_contains "$output_log" "Suggested ydotool command:"
     assert_contains "$output_log" "Suggested portal package:"
     assert_contains "$output_log" "Read Aloud readiness:"
@@ -2930,6 +3119,49 @@ test_setup_native_wizard_sway_hint_is_conservative() {
     assert_not_contains "$output_log" "Sway -> i3 IPC backend through swaymsg"
 }
 
+test_setup_native_wizard_recommends_hyprland_portal() {
+    info "Checking setup-native wizard recommends Hyprland's portal backend"
+    local workspace="$TMP_DIR/setup-native-hyprland-portal"
+    local features_root="$workspace/linux-features"
+    local config="$workspace/features.json"
+    local output_log="$workspace/output.log"
+
+    make_wizard_feature_root "$features_root"
+    printf '%s\n' '{"enabled":[]}' > "$config"
+
+    XDG_CURRENT_DESKTOP=Hyprland \
+    DESKTOP_SESSION=hyprland \
+    XDG_SESSION_DESKTOP=Hyprland \
+    XDG_SESSION_TYPE=wayland \
+    CODEX_BOOTSTRAP_NONINTERACTIVE=1 \
+    CODEX_LINUX_FEATURES_ROOT="$features_root" \
+    CODEX_LINUX_FEATURES_CONFIG="$config" \
+        bash "$REPO_DIR/scripts/bootstrap-wizard.sh" >"$output_log"
+
+    assert_contains "$output_log" "xdg-desktop-portal-hyprland"
+    assert_not_contains "$output_log" "xdg-desktop-portal-wlr"
+}
+
+test_computer_use_optional_runtime_packaging() {
+    info "Checking Computer Use optional runtime packaging and Nix version parity"
+    local cargo_version
+    local nix_version
+
+    cargo_version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' "$REPO_DIR/computer-use-linux/Cargo.toml" | head -n 1)"
+    nix_version="$(sed -n '/pname = "codex-computer-use-linux-binaries";/,/src = computerUseBuildSource;/s/^[[:space:]]*version = "\([^"]*\)";$/\1/p' "$REPO_DIR/flake.nix")"
+    [ -n "$cargo_version" ] || fail "Could not read Computer Use Cargo version"
+    [ "$nix_version" = "$cargo_version" ] \
+        || fail "Expected Nix Computer Use version $cargo_version, got ${nix_version:-missing}"
+
+    assert_contains "$REPO_DIR/packaging/linux/control" "Recommends:.*xdotool"
+    assert_not_contains "$REPO_DIR/packaging/linux/control" "Depends:.*xdotool"
+    assert_contains "$REPO_DIR/packaging/linux/codex-desktop.spec" "Recommends:.*xdotool"
+    assert_not_contains "$REPO_DIR/packaging/linux/codex-desktop.spec" "Requires:.*xdotool"
+    assert_contains "$REPO_DIR/packaging/linux/PKGBUILD.template" "xdotool: full-Unicode Computer Use text entry on X11"
+    assert_contains "$REPO_DIR/flake.nix" "optionals enableComputerUseUi \[ pkgs.xdotool \]"
+    assert_contains "$REPO_DIR/flake.nix" 'launcherPath enableComputerUseUi'
+}
+
 test_setup_native_wizard_cleanup_requires_interactive_confirmation() {
     info "Checking setup-native wizard cleanup refuses non-interactive deletion"
     local workspace="$TMP_DIR/setup-native-cleanup-noninteractive"
@@ -3005,6 +3237,8 @@ test_setup_native_wizard_blank_interactive_cleanup_ids_skip_cleanup() {
     (
         export HOME="$fake_home"
         export XDG_CONFIG_HOME="$fake_home/.config"
+        export CODEX_BOOTSTRAP_COMPUTER_USE_UI=0
+        export CODEX_BOOTSTRAP_RUN_COMPUTER_USE_DOCTOR=0
         export CODEX_LINUX_FEATURES_ROOT="$features_root"
         export CODEX_LINUX_FEATURES_CONFIG="$config"
         {
@@ -3047,6 +3281,8 @@ test_setup_native_wizard_dry_run_cleanup_does_not_delete_confirmed_paths() {
         export XDG_CONFIG_HOME="$fake_home/.config"
         export CODEX_BOOTSTRAP_DRY_RUN=1
         export CODEX_BOOTSTRAP_CLEANUP_FEATURES="remote-mobile-control"
+        export CODEX_BOOTSTRAP_COMPUTER_USE_UI=0
+        export CODEX_BOOTSTRAP_RUN_COMPUTER_USE_DOCTOR=0
         export CODEX_LINUX_FEATURES_ROOT="$features_root"
         export CODEX_LINUX_FEATURES_CONFIG="$config"
         {
@@ -3090,6 +3326,8 @@ test_setup_native_wizard_cleanup_deletes_only_confirmed_paths() {
         export XDG_CONFIG_HOME="$fake_home/.config"
         export XDG_DATA_HOME="$fake_home/.local/share"
         export CODEX_BOOTSTRAP_CLEANUP_FEATURES="remote-mobile-control,read-aloud"
+        export CODEX_BOOTSTRAP_COMPUTER_USE_UI=0
+        export CODEX_BOOTSTRAP_RUN_COMPUTER_USE_DOCTOR=0
         export CODEX_LINUX_FEATURES_ROOT="$features_root"
         export CODEX_LINUX_FEATURES_CONFIG="$config"
         {
@@ -5096,6 +5334,16 @@ EOF
     assert_contains "$REPO_DIR/tests/fixtures/create-packaged-app-fixture.sh" "resources/node-runtime/bin"
     assert_contains "$REPO_DIR/.github/workflows/ci.yml" "tests/fixtures/create-packaged-app-fixture.sh codex-app"
     assert_contains "$REPO_DIR/.github/workflows/ci.yml" "bash scripts/ci/run-node-checks.sh"
+    assert_contains "$REPO_DIR/.github/workflows/ci.yml" "shell: /bin/sh -e {0}"
+    assert_contains "$REPO_DIR/.github/workflows/ci.yml" '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+    assert_contains "$REPO_DIR/README.md" "This fork fixes and substantially improves Computer Use on Linux"
+    assert_contains "$REPO_DIR/README.md" "github.com/alingold/codex-desktop-linux.git"
+    assert_contains "$REPO_DIR/.github/workflows/upstream-sync.yml" "cron: '17 14 \* \* 1'"
+    assert_contains "$REPO_DIR/.github/workflows/upstream-sync.yml" "git merge --no-ff --no-edit"
+    assert_contains "$REPO_DIR/.github/workflows/upstream-sync.yml" "git push --force-with-lease"
+    assert_contains "$REPO_DIR/.github/workflows/upstream-sync.yml" "gh workflow run ci.yml"
+    assert_contains "$REPO_DIR/.github/workflows/upstream-sync.yml" "gh workflow run upstream-build-app.yml"
+    assert_not_contains "$REPO_DIR/.github/workflows/upstream-sync.yml" "gh pr merge"
     assert_contains "$REPO_DIR/scripts/ci/container-entrypoint.sh" "bash scripts/ci/run-node-checks.sh"
     assert_contains "$REPO_DIR/scripts/ci/run-node-checks.sh" "git ls-files '\\*.js'"
     assert_contains "$REPO_DIR/scripts/ci/run-node-checks.sh" "git ls-files '\\*.test.js' 'linux-features/\\*/test.js'"
@@ -8420,10 +8668,15 @@ main() {
     test_setup_native_wizard_portal_summary_survives_busctl_sigpipe
     test_setup_native_wizard_warns_when_conversation_mode_lacks_read_aloud
     test_setup_native_wizard_dry_runs_deps_and_install_native
+    test_setup_native_wizard_persists_computer_use_ui_safely
+    test_setup_native_wizard_computer_use_ui_dry_run_and_malformed_guard
+    test_setup_native_wizard_runs_bounded_computer_use_doctor
     test_setup_native_wizard_prints_deep_readiness_guidance
     test_setup_native_wizard_uinput_stat_is_bounded
     test_setup_native_wizard_read_aloud_paths_match_runtime_defaults
     test_setup_native_wizard_sway_hint_is_conservative
+    test_setup_native_wizard_recommends_hyprland_portal
+    test_computer_use_optional_runtime_packaging
     test_setup_native_wizard_cleanup_requires_interactive_confirmation
     test_setup_native_wizard_dry_run_cleanup_allows_noninteractive_preview
     test_setup_native_wizard_blank_interactive_cleanup_ids_skip_cleanup

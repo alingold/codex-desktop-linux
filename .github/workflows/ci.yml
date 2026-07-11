@@ -17,6 +17,95 @@ env:
   CI_PACKAGE_VERSION: 2026.04.28.000000+ci${{ github.run_number }}
 
 jobs:
+  computer-use-distro-matrix:
+    name: Computer Use (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ matrix.image }}
+      options: --user root
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Ubuntu 24.04
+            image: docker.io/library/ubuntu:24.04
+            family: apt
+          - name: Debian 12
+            image: docker.io/library/debian:12
+            family: apt
+          - name: Fedora
+            image: registry.fedoraproject.org/fedora:latest
+            family: dnf
+          - name: Arch Linux
+            image: docker.io/library/archlinux:base-devel
+            family: pacman
+          - name: openSUSE Tumbleweed
+            image: registry.opensuse.org/opensuse/tumbleweed:latest
+            family: zypper
+    steps:
+      - name: Install bootstrap toolchain
+        env:
+          DISTRO_FAMILY: ${{ matrix.family }}
+        run: |
+          set -eu
+          case "$DISTRO_FAMILY" in
+            apt)
+              apt-get update -qq
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                ca-certificates curl g++ git make pkg-config
+              ;;
+            dnf)
+              dnf install -y ca-certificates curl gcc-c++ git make pkgconf-pkg-config
+              ;;
+            pacman)
+              pacman -Syu --noconfirm --needed ca-certificates curl gcc git make pkgconf
+              ;;
+            zypper)
+              zypper --non-interactive refresh
+              zypper --non-interactive install \
+                ca-certificates curl gcc-c++ git make pkg-config
+              ;;
+          esac
+
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Check and test Computer Use
+        shell: /bin/sh -e {0}
+        run: |
+          export PATH="$HOME/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          "$HOME/.cargo/bin/cargo" check -p codex-computer-use-linux --all-targets
+          "$HOME/.cargo/bin/cargo" test -p codex-computer-use-linux --lib
+
+  computer-use-x11-runtime:
+    name: Computer Use X11 Runtime
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nested X11 runtime
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            metacity \
+            x11-apps \
+            x11-utils \
+            xdotool \
+            xvfb \
+            xserver-xephyr \
+            zenity
+
+      - name: Build Computer Use backend
+        run: cargo build -p codex-computer-use-linux --bin codex-computer-use-linux
+
+      - name: Exercise EWMH runtime
+        run: bash tests/computer_use_x11_smoke.sh
+
   rust-and-smoke:
     name: Rust and Smoke Tests
     runs-on: ubuntu-latest

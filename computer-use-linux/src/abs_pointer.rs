@@ -102,14 +102,31 @@ impl AbsPointer {
         end: (i32, i32),
         button: PointerButton,
     ) -> Result<()> {
+        self.drag_path(&[start, end], button, Duration::from_millis(40))
+    }
+
+    /// Hold `button` while visiting every point in order. Drawing applications
+    /// need intermediate motion events; a single start/end jump is coalesced
+    /// into a straight segment and cannot represent handwriting or a lasso.
+    pub fn drag_path(
+        &mut self,
+        points: &[(i32, i32)],
+        button: PointerButton,
+        point_delay: Duration,
+    ) -> Result<()> {
+        let Some(first) = points.first().copied() else {
+            return Ok(());
+        };
         let code = button.key_code();
-        self.move_to(start.0, start.1)?;
+        self.move_to(first.0, first.1)?;
         sleep(Duration::from_millis(30));
         self.device
             .emit(&[InputEvent::new_now(EventType::KEY.0, code, 1)])?;
-        sleep(Duration::from_millis(40));
-        self.move_to(end.0, end.1)?;
-        sleep(Duration::from_millis(40));
+        sleep(point_delay);
+        for &(x, y) in &points[1..] {
+            self.move_to(x, y)?;
+            sleep(point_delay);
+        }
         self.device
             .emit(&[InputEvent::new_now(EventType::KEY.0, code, 0)])?;
         Ok(())

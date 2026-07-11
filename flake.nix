@@ -133,7 +133,7 @@
 
         codexComputerUseBinaries = pkgs.rustPlatform.buildRustPackage {
           pname = "codex-computer-use-linux-binaries";
-          version = "0.1.2-linux-alpha1";
+          version = "0.3.1-linux-alpha2";
           src = computerUseBuildSource;
 
           cargoLock = {
@@ -273,7 +273,7 @@
           stdenv.cc.cc.lib
           zlib
         ]);
-        launcherPath = pkgs.lib.makeBinPath (with pkgs; [
+        launcherPackages = with pkgs; [
           bash
           coreutils
           curl
@@ -286,7 +286,12 @@
           python3
           systemd
           xdg-utils
-        ]);
+        ];
+        launcherPath = enableComputerUseUi:
+          pkgs.lib.makeBinPath (
+            launcherPackages
+            ++ pkgs.lib.optionals enableComputerUseUi [ pkgs.xdotool ]
+          );
 
         patchNixInstalledApp = installDir: ''
           # Patch generated scripts for NixOS systems without /bin/bash.
@@ -548,7 +553,7 @@ PY
               --replace-fail "/usr/share/applications/codex-desktop.desktop" "$out/share/applications/codex-desktop.desktop"
 
             makeWrapper "$out/opt/codex-desktop/start.sh" "$out/bin/codex-desktop" \
-              --prefix PATH : "${launcherPath}" \
+              --prefix PATH : "${launcherPath enableComputerUseUi}" \
               --prefix LD_LIBRARY_PATH : "${electronLibPath}" \
               --prefix LD_LIBRARY_PATH : "${runtimeLibPath}" \
               --prefix PATH : "/run/current-system/sw/bin" \

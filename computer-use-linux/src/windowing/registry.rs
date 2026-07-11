@@ -1,4 +1,4 @@
-use crate::windowing::backends::{cosmic, gnome, hyprland, i3, kwin};
+use crate::windowing::backends::{cosmic, gnome, hyprland, i3, kwin, x11};
 use crate::windowing::types::WindowInfo;
 use anyhow::{anyhow, Result};
 
@@ -7,8 +7,9 @@ pub use gnome::{GNOME_SHELL_EXTENSION_BACKEND, GNOME_SHELL_INTROSPECT_BACKEND};
 pub use hyprland::HYPRLAND_BACKEND;
 pub use i3::I3_BACKEND;
 pub use kwin::KWIN_BACKEND;
+pub use x11::X11_EWMH_BACKEND;
 
-pub const WINDOW_PERMISSION_HINT: &str = "Computer Use could not access a supported window list backend. Targeted window input requires session-bus access plus GNOME Shell Introspect, the Codex GNOME Shell extension, the COSMIC Wayland helper, KWin/Plasma DBus scripting, Hyprland hyprctl, or i3-msg. On GNOME, run setup_window_targeting to install the extension backend.";
+pub const WINDOW_PERMISSION_HINT: &str = "Computer Use could not access a supported window list backend. Targeted window input requires session-bus access plus GNOME Shell Introspect, the Codex GNOME Shell extension, the COSMIC Wayland helper, KWin/Plasma DBus scripting, Hyprland hyprctl, i3-msg, or an EWMH-compliant X11 window manager. On GNOME, run setup_window_targeting to install the extension backend.";
 
 #[derive(Debug, Clone, Copy)]
 pub struct BackendDescriptor {
@@ -37,6 +38,7 @@ enum BackendKind {
     Kwin,
     Hyprland,
     I3,
+    X11,
 }
 
 const BACKEND_ORDER: &[BackendKind] = &[
@@ -46,6 +48,7 @@ const BACKEND_ORDER: &[BackendKind] = &[
     BackendKind::Kwin,
     BackendKind::Hyprland,
     BackendKind::I3,
+    BackendKind::X11,
 ];
 
 const DESCRIPTORS: &[BackendDescriptor] = &[
@@ -89,6 +92,13 @@ const DESCRIPTORS: &[BackendDescriptor] = &[
         failure_label: "i3",
         list_note: "Window list came from i3-msg. Terminal windows may include best-effort PTY and active-process context when xprop and the process tree are readable.",
         missing_hint: "On i3, ensure i3-msg can reach the active i3 IPC socket.",
+        can_exact_focus: true,
+    },
+    BackendDescriptor {
+        id: X11_EWMH_BACKEND,
+        failure_label: "X11/EWMH",
+        list_note: "Window list came from the standard EWMH X11 interface. Terminal windows may include best-effort PTY and active-process context when the process tree is readable.",
+        missing_hint: "On X11, ensure DISPLAY points to an EWMH-compliant window manager such as Cinnamon, MATE, XFCE, or Openbox.",
         can_exact_focus: true,
     },
 ];
@@ -153,6 +163,7 @@ async fn list_windows_for(backend: BackendKind) -> Result<Vec<WindowInfo>> {
         BackendKind::Kwin => kwin::list_windows().await,
         BackendKind::Hyprland => hyprland::list_windows(),
         BackendKind::I3 => i3::list_windows(),
+        BackendKind::X11 => x11::list_windows(),
     }
 }
 
@@ -176,9 +187,34 @@ pub async fn activate_window(window: &WindowInfo) -> Result<()> {
         KWIN_BACKEND => kwin::activate_window(window.window_id).await,
         HYPRLAND_BACKEND => hyprland::activate_window(window.window_id),
         I3_BACKEND => i3::activate_window(window.window_id),
+        X11_EWMH_BACKEND => x11::activate_window(window.window_id),
         backend => Err(anyhow!(
             "Unsupported window backend for activation: {backend}"
         )),
+    }
+}
+
+pub async fn move_window(window: &WindowInfo, x: i32, y: i32) -> Result<String> {
+    match window.backend.as_str() {
+        GNOME_SHELL_EXTENSION_BACKEND => gnome::move_extension_window(window.window_id, x, y).await,
+        KWIN_BACKEND => kwin::move_window(window.window_id, x, y).await,
+        HYPRLAND_BACKEND => hyprland::move_window(window.window_id, x, y),
+        I3_BACKEND => i3::move_window(window.window_id, x, y),
+        X11_EWMH_BACKEND => x11::move_window(window.window_id, x, y),
+        backend => Err(anyhow!("Window move is unsupported by backend {backend}")),
+    }
+}
+
+pub async fn resize_window(window: &WindowInfo, width: i32, height: i32) -> Result<String> {
+    match window.backend.as_str() {
+        GNOME_SHELL_EXTENSION_BACKEND => {
+            gnome::resize_extension_window(window.window_id, width, height).await
+        }
+        KWIN_BACKEND => kwin::resize_window(window.window_id, width, height).await,
+        HYPRLAND_BACKEND => hyprland::resize_window(window.window_id, width, height),
+        I3_BACKEND => i3::resize_window(window.window_id, width, height),
+        X11_EWMH_BACKEND => x11::resize_window(window.window_id, width, height),
+        backend => Err(anyhow!("Window resize is unsupported by backend {backend}")),
     }
 }
 
@@ -194,6 +230,7 @@ pub fn probe_backends() -> Vec<BackendProbe> {
         kwin::probe(),
         hyprland::probe(),
         i3::probe(),
+        x11::probe(),
     ]
 }
 
@@ -206,6 +243,7 @@ impl BackendKind {
             BackendKind::Kwin => KWIN_BACKEND,
             BackendKind::Hyprland => HYPRLAND_BACKEND,
             BackendKind::I3 => I3_BACKEND,
+            BackendKind::X11 => X11_EWMH_BACKEND,
         }
     }
 

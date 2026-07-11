@@ -79,37 +79,121 @@ pub(crate) fn parse_i3_tree(json: &str) -> Result<Vec<WindowInfo>> {
 }
 
 pub fn activate_window(window_id: u64) -> Result<()> {
-    let selector = format!(r#"[id="0x{window_id:x}"] focus"#);
+    run_i3_window_command(window_id, "focus")
+}
+
+pub fn move_window(window_id: u64, x: i32, y: i32) -> Result<String> {
+    let command = format!("move position {x} px {y} px");
+    run_i3_window_command(window_id, &command)?;
+
+    let bounds = query_i3_window_bounds(window_id)?;
+    if bounds.x != Some(x) || bounds.y != Some(y) {
+        bail!(
+            "i3 accepted the move request for window {window_id}, but reported position ({}, {}) instead of ({x}, {y}); pixel positioning is only exact for floating containers",
+            optional_coordinate(bounds.x),
+            optional_coordinate(bounds.y),
+        );
+    }
+
+    Ok(format!("Moved i3 window {window_id} to ({x}, {y})."))
+}
+
+pub fn resize_window(window_id: u64, width: i32, height: i32) -> Result<String> {
+    if width < 1 || height < 1 {
+        bail!("window width and height must both be positive");
+    }
+
+    let command = format!("resize set width {width} px height {height} px");
+    run_i3_window_command(window_id, &command)?;
+
+    let bounds = query_i3_window_bounds(window_id)?;
+    if bounds.width != width as u32 || bounds.height != height as u32 {
+        bail!(
+            "i3 accepted the resize request for window {window_id}, but reported {}x{} instead of {width}x{height}; the container may be tiled or constrained by its application",
+            bounds.width,
+            bounds.height,
+        );
+    }
+
+    Ok(format!(
+        "Resized i3 window {window_id} to {width}x{height}."
+    ))
+}
+
+fn run_i3_window_command(window_id: u64, command: &str) -> Result<()> {
+    let selector = format!(r#"[id="0x{window_id:x}"] {command}"#);
     let output = i3_msg_command()
         .arg(&selector)
         .output()
         .with_context(|| format!("failed to run i3-msg {selector}"))?;
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let detail = if stderr.is_empty() { stdout } else { stderr };
         bail!(
-            "i3-msg {selector} failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-
-    let replies: Vec<I3CommandReply> =
-        serde_json::from_slice(&output.stdout).context("failed to parse i3-msg focus reply")?;
-    if replies.iter().all(|reply| reply.success) {
-        Ok(())
-    } else {
-        let details = replies
-            .into_iter()
-            .filter_map(|reply| reply.error)
-            .collect::<Vec<_>>()
-            .join("; ");
-        bail!(
-            "i3-msg {selector} did not focus the window: {}",
-            if details.is_empty() {
-                "unknown i3 failure"
+            "i3-msg {selector} failed{}",
+            if detail.is_empty() {
+                String::new()
             } else {
-                details.as_str()
+                format!(": {detail}")
             }
         );
     }
+
+    validate_i3_command_replies(&selector, &output.stdout)
+}
+
+fn validate_i3_command_replies(command: &str, json: &[u8]) -> Result<()> {
+    let replies: Vec<I3CommandReply> = serde_json::from_slice(json)
+        .with_context(|| format!("failed to parse i3-msg reply for {command}"))?;
+    if replies.is_empty() {
+        bail!("i3-msg {command} returned no command replies");
+    }
+    if replies.iter().all(|reply| reply.success) {
+        return Ok(());
+    }
+
+    let details = replies
+        .into_iter()
+        .filter(|reply| !reply.success)
+        .filter_map(|reply| reply.error)
+        .collect::<Vec<_>>()
+        .join("; ");
+    bail!(
+        "i3-msg {command} refused the operation: {}",
+        if details.is_empty() {
+            "unknown i3 failure"
+        } else {
+            details.as_str()
+        }
+    );
+}
+
+fn query_i3_window_bounds(window_id: u64) -> Result<WindowBounds> {
+    let output = i3_msg_command()
+        .args(["-t", "get_tree"])
+        .output()
+        .context("failed to query i3 geometry after window operation")?;
+    if !output.status.success() {
+        bail!(
+            "i3-msg -t get_tree failed while verifying window geometry: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    parse_i3_tree(&String::from_utf8_lossy(&output.stdout))?
+        .into_iter()
+        .find(|window| window.window_id == window_id)
+        .with_context(|| {
+            format!("i3 no longer reports window {window_id} after the geometry request")
+        })?
+        .bounds
+        .with_context(|| format!("i3 returned no bounds for window {window_id}"))
+}
+
+fn optional_coordinate(value: Option<i32>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn collect_i3_windows(
@@ -303,5 +387,33 @@ impl I3Node {
             backend: I3_BACKEND.to_string(),
             terminal: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validates_nonempty_successful_i3_command_reply() {
+        validate_i3_command_replies("focus", br#"[{"success":true}]"#).unwrap();
+    }
+
+    #[test]
+    fn rejects_empty_i3_command_reply() {
+        let error = validate_i3_command_replies("focus", b"[]").unwrap_err();
+
+        assert!(error.to_string().contains("returned no command replies"));
+    }
+
+    #[test]
+    fn preserves_i3_command_failure_detail() {
+        let error = validate_i3_command_replies(
+            "resize",
+            br#"[{"success":false,"error":"Cannot resize a dock client"}]"#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("Cannot resize a dock client"));
     }
 }

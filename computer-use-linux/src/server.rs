@@ -6,21 +6,23 @@ use crate::atspi_tree::{
 use crate::diagnostics::{doctor_report, setup_accessibility_report, DoctorReport, SetupReport};
 use crate::gnome_extension::{setup_window_targeting_report, WindowTargetingSetupReport};
 use crate::remote_desktop::{
-    click as portal_click, drag as portal_drag, keysyms_for_text, press_keycode_chord,
-    scroll as portal_scroll, start_portal_keyboard_session, start_portal_pointer_session,
-    type_text_with_keysyms, PointerButton, PortalKeyboardSession, PortalPointerSession,
-    ScrollDirection,
+    click as portal_click, drag as portal_drag, draw_path as portal_draw_path, keysyms_for_text,
+    press_keycode_chord, scroll as portal_scroll, start_portal_keyboard_session,
+    start_portal_pointer_session, type_text_with_keysyms, PointerButton, PortalKeyboardSession,
+    PortalPointerSession, ScrollDirection,
 };
 use crate::screenshot::{
     capture_screenshot_raw, prepare_screenshot_payload, RawScreenshotCapture, ScreenshotCapture,
     ScreenshotOutputFormat, ScreenshotPayloadOptions,
 };
+use crate::terminal::looks_like_terminal_window;
 use crate::windowing::registry;
 use crate::windows::{
     focus_window_target, focused_window, list_windows, resolve_window_target,
     window_permission_hint, WindowFocusResult, WindowInfo, WindowTarget,
     GNOME_SHELL_INTROSPECT_BACKEND,
 };
+use crate::x11_clipboard::{ClipboardRestoration, X11Clipboard, X11ClipboardPasteReport};
 use anyhow::Result;
 use rmcp::{
     handler::server::wrapper::{Json, Parameters},
@@ -46,6 +48,7 @@ use tokio::{
 use zbus::{Connection as ZbusConnection, Proxy as ZbusProxy};
 
 const YDOTOOL_TIMEOUT: Duration = Duration::from_secs(10);
+const XDOTOOL_TIMEOUT: Duration = Duration::from_secs(5);
 const YDOTOOL_TYPE_CHARS_PER_SECOND: u64 = 20;
 const KDE_CLIPBOARD_DBUS_TIMEOUT: Duration = Duration::from_secs(3);
 const KDE_KLIPPER_SERVICE: &str = "org.kde.klipper";
@@ -61,6 +64,12 @@ pub struct ComputerUseLinux {
     abs_pointer: Arc<Mutex<Option<crate::abs_pointer::AbsPointer>>>,
     portal_keyboard_init_lock: Arc<tokio::sync::Mutex<()>>,
     kde_clipboard_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes focus verification and keyboard delivery across concurrent
+    /// MCP calls so one agent action cannot steal another action's target.
+    keyboard_input_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Lazily connected, long-lived X11 clipboard owner used for transactional
+    /// Unicode paste and restoration on native X11 sessions.
+    x11_clipboard: Arc<tokio::sync::Mutex<Option<X11Clipboard>>>,
     /// Cached logical desktop size (union of monitors) from the most recent
     /// full-frame capture; used for off-screen window/coordinate warnings.
     desktop_size: Arc<Mutex<Option<(u32, u32)>>>,
@@ -996,7 +1005,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "drag",
-        description = "Drag from one point to another using pixel coordinates.",
+        description = "Drag from one point to another using pixel coordinates. With a window target, exact focus is verified and both endpoints must remain inside that window. Set relative=true to use window-cropped screenshot coordinates.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1004,8 +1013,80 @@ impl ComputerUseLinux {
             open_world_hint = true
         )
     )]
-    async fn drag(&self, Parameters(params): Parameters<DragParams>) -> Json<ActionOutput> {
-        let received = Some(serde_json::json!(params));
+    async fn drag(&self, Parameters(mut params): Parameters<DragParams>) -> Json<ActionOutput> {
+        let received = Some(serde_json::json!(params.clone()));
+        let window_target = params.window_target();
+        if params.relative == Some(true) && window_target.is_none() {
+            return Json(ActionOutput {
+                ok: false,
+                implemented: true,
+                action: "drag".to_string(),
+                message: "Relative drag coordinates require a window target.".to_string(),
+                received,
+            });
+        }
+
+        let mut focus = None;
+        if let Some(target) = window_target {
+            focus = match self.focus_target_for_input(&target).await {
+                Ok(focus) => focus,
+                Err(message) => {
+                    return Json(ActionOutput {
+                        ok: false,
+                        implemented: true,
+                        action: "drag".to_string(),
+                        message,
+                        received,
+                    });
+                }
+            };
+            let Some(verified_focus) = focus.as_ref() else {
+                return Json(ActionOutput {
+                    ok: false,
+                    implemented: true,
+                    action: "drag".to_string(),
+                    message: "Targeted drag requires verified target-window focus.".to_string(),
+                    received,
+                });
+            };
+            if let Err(message) = validate_exact_drag_focus(verified_focus) {
+                return Json(ActionOutput {
+                    ok: false,
+                    implemented: true,
+                    action: "drag".to_string(),
+                    message,
+                    received,
+                });
+            }
+            let validation = if params.relative == Some(true) {
+                apply_window_relative_drag_coordinates(&mut params, verified_focus)
+            } else {
+                validate_absolute_drag_coordinates(&params, verified_focus)
+            };
+            if let Err(message) = validation {
+                return Json(ActionOutput {
+                    ok: false,
+                    implemented: true,
+                    action: "drag".to_string(),
+                    message,
+                    received,
+                });
+            }
+        }
+
+        // Snapshot the fully validated coordinates before initializing any
+        // pointer backend. Relative translation is all-or-nothing, so a bad
+        // endpoint cannot leave a partially transformed gesture behind.
+        let (start_x, start_y, end_x, end_y) =
+            (params.start_x, params.start_y, params.end_x, params.end_y);
+        let off_screen_note = match focus
+            .as_ref()
+            .and_then(|focus| focused_or_requested_bounds(focus))
+        {
+            Some(bounds) => self.off_screen_note_for_bounds(bounds).await,
+            None => None,
+        };
+
         // Preferred backend: the uinput absolute pointer (accurate landing).
         if self.ensure_abs_pointer().await {
             let abs_pointer = Arc::clone(&self.abs_pointer);
@@ -1013,8 +1094,8 @@ impl ComputerUseLinux {
                 if let Ok(mut guard) = abs_pointer.lock() {
                     guard.as_mut().map(|p| {
                         p.drag(
-                            (params.start_x, params.start_y),
-                            (params.end_x, params.end_y),
+                            (start_x, start_y),
+                            (end_x, end_y),
                             crate::abs_pointer::PointerButton::Left,
                         )
                         .is_ok()
@@ -1027,70 +1108,248 @@ impl ComputerUseLinux {
             .ok()
             .flatten();
             if dragged == Some(true) {
-                return Json(ActionOutput {
-                    ok: true,
-                    implemented: true,
-                    action: "drag".to_string(),
-                    message: "Action sent through the uinput absolute pointer.".to_string(),
-                    received,
-                });
+                return Json(with_notes(
+                    successful_action_with_focus(
+                        "drag",
+                        "Action sent through the uinput absolute pointer.",
+                        received,
+                        focus.clone(),
+                    ),
+                    off_screen_note.clone(),
+                ));
             }
         }
         if let Some(session) = self.cached_portal_pointer_session() {
-            match portal_drag(
-                &session,
-                params.start_x,
-                params.start_y,
-                params.end_x,
-                params.end_y,
-            )
-            .await
-            {
+            match portal_drag(&session, start_x, start_y, end_x, end_y).await {
                 Ok(()) => {
-                    return Json(ActionOutput {
-                        ok: true,
-                        implemented: true,
-                        action: "drag".to_string(),
-                        message: "Action sent through the remote desktop portal.".to_string(),
-                        received,
-                    });
+                    return Json(with_notes(
+                        successful_action_with_focus(
+                            "drag",
+                            "Action sent through the remote desktop portal.",
+                            received,
+                            focus.clone(),
+                        ),
+                        off_screen_note.clone(),
+                    ));
                 }
                 Err(_) => self.clear_portal_pointer_session(),
             }
         } else if self.should_prefer_portal_pointer_backend() {
             match self.ensure_portal_pointer_session().await {
-                Ok(Some(session)) => match portal_drag(
-                    &session,
-                    params.start_x,
-                    params.start_y,
-                    params.end_x,
-                    params.end_y,
-                )
-                .await
-                {
-                    Ok(()) => {
-                        return Json(ActionOutput {
-                            ok: true,
-                            implemented: true,
-                            action: "drag".to_string(),
-                            message: "Action sent through the remote desktop portal.".to_string(),
-                            received,
-                        });
+                Ok(Some(session)) => {
+                    match portal_drag(&session, start_x, start_y, end_x, end_y).await {
+                        Ok(()) => {
+                            return Json(with_notes(
+                                successful_action_with_focus(
+                                    "drag",
+                                    "Action sent through the remote desktop portal.",
+                                    received,
+                                    focus.clone(),
+                                ),
+                                off_screen_note.clone(),
+                            ));
+                        }
+                        Err(_) => self.clear_portal_pointer_session(),
                     }
-                    Err(_) => self.clear_portal_pointer_session(),
-                },
+                }
                 Ok(None) => {}
                 Err(_) => {}
             }
         }
         let result = run_ydotool_sequence(&[
-            absolute_mousemove_args(params.start_x, params.start_y),
+            absolute_mousemove_args(start_x, start_y),
             vec!["click".to_string(), "0x40".to_string()],
-            absolute_mousemove_args(params.end_x, params.end_y),
+            absolute_mousemove_args(end_x, end_y),
             vec!["click".to_string(), "0x80".to_string()],
         ])
         .await;
-        Json(action_result("drag", result, received))
+        Json(with_notes(
+            action_result_with_focus("drag", result, received, focus),
+            off_screen_note,
+        ))
+    }
+
+    #[tool(
+        name = "draw_path",
+        description = "Draw or drag along a continuous path. Holds the selected mouse button while visiting every pixel coordinate in order, then releases it. Use this instead of repeated drag calls for handwriting, signatures, freeform drawing, lassos, and curves. Provide 2-512 points; point_delay_ms defaults to 12ms. With a window target, focus is verified and every point must remain inside that window. Set relative=true to use window-cropped screenshot coordinates.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn draw_path(
+        &self,
+        Parameters(mut params): Parameters<DrawPathParams>,
+    ) -> Json<ActionOutput> {
+        let received = Some(serde_json::json!(params.clone()));
+        if !(2..=512).contains(&params.points.len()) {
+            return Json(ActionOutput {
+                ok: false,
+                implemented: true,
+                action: "draw_path".to_string(),
+                message: "draw_path requires between 2 and 512 points".to_string(),
+                received,
+            });
+        }
+        let delay = Duration::from_millis(u64::from(params.point_delay_ms.clamp(1, 100)));
+        let Some((button_press, button_release)) =
+            ydotool_pointer_button_masks(params.button.as_deref())
+        else {
+            return Json(ActionOutput {
+                ok: false,
+                implemented: true,
+                action: "draw_path".to_string(),
+                message: "Unsupported button. Use left, right, or middle.".to_string(),
+                received,
+            });
+        };
+        let window_target = params.window_target();
+        if params.relative == Some(true) && window_target.is_none() {
+            return Json(ActionOutput {
+                ok: false,
+                implemented: true,
+                action: "draw_path".to_string(),
+                message: "Relative draw_path coordinates require a window target.".to_string(),
+                received,
+            });
+        }
+        let mut focus = None;
+        if let Some(target) = window_target {
+            focus = match self.focus_target_for_input(&target).await {
+                Ok(focus) => focus,
+                Err(message) => {
+                    return Json(ActionOutput {
+                        ok: false,
+                        implemented: true,
+                        action: "draw_path".to_string(),
+                        message,
+                        received,
+                    });
+                }
+            };
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            let Some(verified_focus) = focus.as_ref() else {
+                return Json(ActionOutput {
+                    ok: false,
+                    implemented: true,
+                    action: "draw_path".to_string(),
+                    message: "Targeted draw_path requires verified target-window focus."
+                        .to_string(),
+                    received,
+                });
+            };
+            let validation = if params.relative == Some(true) {
+                apply_window_relative_path_coordinates(&mut params, verified_focus)
+            } else {
+                validate_absolute_path_coordinates(&params.points, verified_focus)
+            };
+            if let Err(message) = validation {
+                return Json(ActionOutput {
+                    ok: false,
+                    implemented: true,
+                    action: "draw_path".to_string(),
+                    message,
+                    received,
+                });
+            }
+        }
+        let abs_button = crate::abs_pointer::PointerButton::from_name(params.button.as_deref());
+        let portal_button = PointerButton::from_name(params.button.as_deref());
+        let points = params
+            .points
+            .iter()
+            .map(|point| (point.x, point.y))
+            .collect::<Vec<_>>();
+        let off_screen_note = match focus
+            .as_ref()
+            .and_then(|focus| focused_or_requested_bounds(focus))
+        {
+            Some(bounds) => self.off_screen_note_for_bounds(bounds).await,
+            None => None,
+        };
+
+        if self.ensure_abs_pointer().await {
+            let abs_pointer = Arc::clone(&self.abs_pointer);
+            let abs_points = points.clone();
+            let drawn = tokio::task::spawn_blocking(move || {
+                let mut guard = abs_pointer.lock().ok()?;
+                Some(
+                    guard
+                        .as_mut()?
+                        .drag_path(&abs_points, abs_button, delay)
+                        .is_ok(),
+                )
+            })
+            .await
+            .ok()
+            .flatten();
+            if drawn == Some(true) {
+                return Json(with_notes(
+                    ActionOutput {
+                        ok: true,
+                        implemented: true,
+                        action: "draw_path".to_string(),
+                        message: "Continuous path sent through the uinput absolute pointer."
+                            .to_string(),
+                        received,
+                    },
+                    off_screen_note.clone(),
+                ));
+            }
+        }
+
+        if let Some(session) = self.cached_portal_pointer_session() {
+            match portal_draw_path(&session, &points, portal_button, delay).await {
+                Ok(()) => {
+                    return Json(with_notes(
+                        ActionOutput {
+                            ok: true,
+                            implemented: true,
+                            action: "draw_path".to_string(),
+                            message: "Continuous path sent through the remote desktop portal."
+                                .to_string(),
+                            received,
+                        },
+                        off_screen_note.clone(),
+                    ));
+                }
+                Err(_) => self.clear_portal_pointer_session(),
+            }
+        } else if self.should_prefer_portal_pointer_backend() {
+            if let Ok(Some(session)) = self.ensure_portal_pointer_session().await {
+                match portal_draw_path(&session, &points, portal_button, delay).await {
+                    Ok(()) => {
+                        return Json(with_notes(
+                            ActionOutput {
+                                ok: true,
+                                implemented: true,
+                                action: "draw_path".to_string(),
+                                message: "Continuous path sent through the remote desktop portal."
+                                    .to_string(),
+                                received,
+                            },
+                            off_screen_note.clone(),
+                        ));
+                    }
+                    Err(_) => self.clear_portal_pointer_session(),
+                }
+            }
+        }
+
+        let mut sequence = Vec::with_capacity(params.points.len() + 2);
+        sequence.push(absolute_mousemove_args(points[0].0, points[0].1));
+        sequence.push(vec!["click".to_string(), button_press.to_string()]);
+        for &(x, y) in &points[1..] {
+            sequence.push(absolute_mousemove_args(x, y));
+        }
+        sequence.push(vec!["click".to_string(), button_release.to_string()]);
+        let result = run_ydotool_sequence(&sequence).await;
+        Json(with_notes(
+            action_result("draw_path", result, received),
+            off_screen_note,
+        ))
     }
 
     #[tool(
@@ -1107,8 +1366,9 @@ impl ComputerUseLinux {
         &self,
         Parameters(params): Parameters<PressKeyParams>,
     ) -> Json<ActionOutput> {
+        let _keyboard_guard = self.keyboard_input_lock.lock().await;
         let received = Some(serde_json::json!(params.clone()));
-        let focus = match self.focus_target_for_input(&params.window_target()).await {
+        let mut focus = match self.focus_target_for_input(&params.window_target()).await {
             Ok(focus) => focus,
             Err(message) => {
                 return Json(ActionOutput {
@@ -1120,7 +1380,7 @@ impl ComputerUseLinux {
                 });
             }
         };
-        let Some(key_events) = key_sequence(&params.key) else {
+        let Some((modifiers, keycode)) = key_chord(&params.key) else {
             return Json(ActionOutput {
                 ok: false,
                 implemented: true,
@@ -1129,6 +1389,93 @@ impl ComputerUseLinux {
                 received,
             });
         };
+        let pinned = self.pin_input_target(focus.as_ref()).await;
+        if self.should_prefer_portal_key_chord_backend() {
+            match self.ensure_portal_keyboard_session().await {
+                Ok(Some(session)) => {
+                    match self.refocus_pinned_input_target(pinned.as_ref()).await {
+                        Ok(Some(reverified)) => focus = Some(reverified),
+                        Ok(None) => {}
+                        Err(message) => {
+                            return Json(action_result_with_focus(
+                                "press_key",
+                                Err(message),
+                                received,
+                                focus,
+                            ));
+                        }
+                    }
+                    let portal_modifiers = modifiers
+                        .iter()
+                        .map(|key| i32::from(*key))
+                        .collect::<Vec<_>>();
+                    match press_keycode_chord(&session, &portal_modifiers, i32::from(keycode)).await
+                    {
+                        Ok(()) => {
+                            let notes = self.input_landing_notes(focus.as_ref(), false).await;
+                            return Json(with_notes(
+                                successful_action_with_focus(
+                                    "press_key",
+                                    "Action sent through the remote desktop portal.",
+                                    received,
+                                    focus,
+                                ),
+                                notes,
+                            ));
+                        }
+                        Err(error) => {
+                            self.clear_portal_keyboard_session();
+                            return Json(action_result_with_focus(
+                                "press_key",
+                                Err(format!("{error:#}")),
+                                received,
+                                focus,
+                            ));
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(_) => {}
+            }
+        }
+        match self.refocus_pinned_input_target(pinned.as_ref()).await {
+            Ok(Some(reverified)) => focus = Some(reverified),
+            Ok(None) => {}
+            Err(message) => {
+                return Json(action_result_with_focus(
+                    "press_key",
+                    Err(message),
+                    received,
+                    focus,
+                ));
+            }
+        }
+        if self.is_x11_session() && command_succeeds("xdotool", &["--version"]) {
+            let xdotool_key = xdotool_key_chord(&params.key).expect("validated key chord");
+            match run_xdotool_key(&xdotool_key).await {
+                Ok(()) => {
+                    let notes = self.input_landing_notes(focus.as_ref(), false).await;
+                    return Json(with_notes(
+                        successful_action_with_focus(
+                            "press_key",
+                            "Action sent through native X11 XTEST input.",
+                            received,
+                            focus,
+                        ),
+                        notes,
+                    ));
+                }
+                Err(error) => {
+                    return Json(action_result_with_focus(
+                        "press_key",
+                        Err(error),
+                        received,
+                        focus,
+                    ));
+                }
+            }
+        }
+        let key_events = key_sequence(&params.key).expect("validated key chord");
         let mut args = vec!["key".to_string()];
         args.extend(key_events);
         let result = run_ydotool(&args).await.map(|output| vec![output]);
@@ -1154,8 +1501,9 @@ impl ComputerUseLinux {
         &self,
         Parameters(params): Parameters<TypeTextParams>,
     ) -> Json<ActionOutput> {
+        let _keyboard_guard = self.keyboard_input_lock.lock().await;
         let received = Some(serde_json::json!(params.clone()));
-        let focus = match self.focus_target_for_input(&params.window_target()).await {
+        let mut focus = match self.focus_target_for_input(&params.window_target()).await {
             Ok(focus) => focus,
             Err(message) => {
                 return Json(ActionOutput {
@@ -1167,11 +1515,27 @@ impl ComputerUseLinux {
                 });
             }
         };
+        let pinned = self.pin_input_target(focus.as_ref()).await;
+        let mut backend_notes = Vec::new();
         if self.should_prefer_kde_clipboard_text_backend() {
             match self.ensure_portal_keyboard_session().await {
                 Ok(Some(session)) => {
                     let _clipboard_guard = self.kde_clipboard_lock.lock().await;
-                    match run_kde_clipboard_paste_text(&session, &params.text).await {
+                    match self.refocus_pinned_input_target(pinned.as_ref()).await {
+                        Ok(Some(reverified)) => focus = Some(reverified),
+                        Ok(None) => {}
+                        Err(message) => {
+                            return Json(action_result_with_focus(
+                                "type_text",
+                                Err(message),
+                                received,
+                                focus,
+                            ));
+                        }
+                    }
+                    let terminal_paste = pinned.as_ref().is_some_and(|target| target.terminal);
+                    match run_kde_clipboard_paste_text(&session, &params.text, terminal_paste).await
+                    {
                         Ok(message) => {
                             let notes = self.input_landing_notes(focus.as_ref(), true).await;
                             return Json(with_notes(
@@ -1203,12 +1567,102 @@ impl ComputerUseLinux {
                 Err(_) => {}
             }
         }
+        if self.should_prefer_x11_clipboard_text_backend() {
+            match self.ensure_x11_clipboard().await {
+                Ok(clipboard) => {
+                    let callback_focus = Arc::new(tokio::sync::Mutex::new(None));
+                    let callback_focus_writer = Arc::clone(&callback_focus);
+                    let pinned_for_callback = pinned.clone();
+                    let terminal_paste = pinned.as_ref().is_some_and(|target| target.terminal);
+                    let paste_result = clipboard
+                        .paste_text(&params.text, || async move {
+                            let reverified = self
+                                .refocus_pinned_input_target(pinned_for_callback.as_ref())
+                                .await?;
+                            if let Some(reverified) = reverified {
+                                *callback_focus_writer.lock().await = Some(reverified);
+                            }
+                            paste_with_xdotool(terminal_paste).await
+                        })
+                        .await;
+                    if let Some(reverified) = callback_focus.lock().await.take() {
+                        focus = Some(reverified);
+                    }
+                    match paste_result {
+                        Ok(report) => {
+                            let notes = self.input_landing_notes(focus.as_ref(), true).await;
+                            return Json(with_notes(
+                                successful_action_with_focus(
+                                    "type_text",
+                                    &x11_clipboard_success_message(&report),
+                                    received,
+                                    focus,
+                                ),
+                                notes,
+                            ));
+                        }
+                        Err(error) if error.can_fallback_to_keyboard() => {
+                            backend_notes.push(format!(
+                                "Native X11 clipboard paste was skipped safely: {}",
+                                error
+                            ));
+                            if !params.text.is_ascii() {
+                                return Json(action_result_with_focus(
+                                    "type_text",
+                                    Err(format!(
+                                        "Did not send non-ASCII text because the native X11 clipboard path could not preserve the current clipboard safely: {error}. The clipboard was left untouched; target an editable element with set_value or retry after the clipboard contains plain text."
+                                    )),
+                                    received,
+                                    focus,
+                                ));
+                            }
+                        }
+                        Err(error) => {
+                            return Json(action_result_with_focus(
+                                "type_text",
+                                Err(error.to_string()),
+                                received,
+                                focus,
+                            ));
+                        }
+                    }
+                }
+                Err(error) => {
+                    backend_notes.push(format!(
+                        "Native X11 clipboard integration was unavailable: {error}"
+                    ));
+                    if !params.text.is_ascii() {
+                        return Json(action_result_with_focus(
+                            "type_text",
+                            Err(format!(
+                                "Did not send non-ASCII text because native X11 clipboard initialization failed: {error}"
+                            )),
+                            received,
+                            focus,
+                        ));
+                    }
+                }
+            }
+        }
+        match self.refocus_pinned_input_target(pinned.as_ref()).await {
+            Ok(Some(reverified)) => focus = Some(reverified),
+            Ok(None) => {}
+            Err(message) => {
+                return Json(action_result_with_focus(
+                    "type_text",
+                    Err(message),
+                    received,
+                    focus,
+                ));
+            }
+        }
         if self.should_prefer_portal_keyboard_backend() {
             if let Ok(keysyms) = keysyms_for_text(&params.text) {
                 match self.ensure_portal_keyboard_session().await {
                     Ok(Some(session)) => match type_text_with_keysyms(&session, &keysyms).await {
                         Ok(()) => {
-                            let notes = self.input_landing_notes(focus.as_ref(), true).await;
+                            let mut notes = backend_notes.clone();
+                            notes.extend(self.input_landing_notes(focus.as_ref(), true).await);
                             return Json(with_notes(
                                 successful_action_with_focus(
                                     "type_text",
@@ -1238,16 +1692,17 @@ impl ComputerUseLinux {
             .await
             .map(|output| vec![output]);
         let mut output = action_result_with_focus("type_text", result, received, focus.clone());
+        let mut notes = backend_notes;
         if output.ok && focus.is_some() {
-            let notes = self.input_landing_notes(focus.as_ref(), true).await;
-            output = with_notes(output, notes);
+            notes.extend(self.input_landing_notes(focus.as_ref(), true).await);
         }
+        output = with_notes(output, notes);
         Json(output)
     }
 
     #[tool(
         name = "move_window",
-        description = "Move a window to a new desktop position (frame top-left in desktop coordinates). Useful to recover windows that are partially off-screen. Requires the computer-use-linux GNOME Shell extension.",
+        description = "Move a window to a new desktop position (frame top-left in desktop coordinates). Useful to recover windows that are partially off-screen. Supported by the GNOME Shell extension, X11/EWMH, KWin, Hyprland, and i3 backends; unsupported backends return an explicit error.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1261,16 +1716,17 @@ impl ComputerUseLinux {
     ) -> Json<WindowGeometryOutput> {
         let received = Some(serde_json::json!(params.clone()));
         let target = params.target.clone().into_target();
-        self.window_geometry_op(received, &target, |window_id| async move {
-            crate::windowing::backends::gnome::move_extension_window(window_id, params.x, params.y)
-                .await
-        })
+        self.window_geometry_op(
+            received,
+            &target,
+            WindowGeometryRequest::Move(params.x, params.y),
+        )
         .await
     }
 
     #[tool(
         name = "resize_window",
-        description = "Resize a window to a new frame width/height in desktop pixels, unmaximizing it first if needed. Useful to fit a window fully on-screen. Requires the computer-use-linux GNOME Shell extension.",
+        description = "Resize a window to a new frame width/height in desktop pixels, unmaximizing it first if needed. Useful to fit a window fully on-screen. Supported by the GNOME Shell extension, X11/EWMH, KWin, Hyprland, and i3 backends; unsupported backends return an explicit error.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1284,14 +1740,11 @@ impl ComputerUseLinux {
     ) -> Json<WindowGeometryOutput> {
         let received = Some(serde_json::json!(params.clone()));
         let target = params.target.clone().into_target();
-        self.window_geometry_op(received, &target, |window_id| async move {
-            crate::windowing::backends::gnome::resize_extension_window(
-                window_id,
-                params.width,
-                params.height,
-            )
-            .await
-        })
+        self.window_geometry_op(
+            received,
+            &target,
+            WindowGeometryRequest::Resize(params.width, params.height),
+        )
         .await
     }
 }
@@ -1302,8 +1755,8 @@ impl ComputerUseLinux {
     // The rmcp tool_handler macro only accepts a string literal here, so this
     // can't be env!("CARGO_PKG_VERSION"); the MCP safety check (CI) fails the
     // build if it drifts from the Cargo version.
-    version = "0.3.1-linux-alpha1",
-    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell, the Codex GNOME Shell extension, or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send layout-safe literal type_text through KDE clipboard integration on Plasma Wayland or through portal keysyms on other Wayland sessions before falling back to ydotool. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append focused-element feedback from AT-SPI (role, name, editable) and warn when no editable element holds focus — treat that warning as the input not landing. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window (GNOME Shell extension backend) to bring a window fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Electron apps expose no AT-SPI tree unless launched with --force-renderer-accessibility."
+    version = "0.3.1-linux-alpha2",
+    instructions = "Begin every turn that uses Computer Use by calling get_app_state. If diagnostics report disabled GNOME accessibility, call setup_accessibility before asking the user to retry. Use list_windows/focused_window before targeted keyboard input. If diagnostics report windowing.can_list_windows=false on GNOME, call setup_window_targeting to install the optional GNOME Shell extension backend, then ask the user to log out and back in if the setup report says a shell reload is required. This Linux backend can capture size-bounded screenshots through GNOME Shell, the Codex GNOME Shell extension, or XDG Desktop Portal, read AT-SPI trees with action/value metadata, invoke native AT-SPI actions, set AT-SPI values or editable text, list/focus compositor windows through registered Linux window backends when the session permits it, attach best-effort terminal tty/process metadata to terminal windows, send coordinate or element-targeted click/scroll/drag input through the Wayland remote desktop portal when available, and send layout-safe literal type_text through a transactional native X11 clipboard plus an xdotool paste chord when available, KDE clipboard integration on Plasma Wayland, or portal keysyms on other Wayland sessions before falling back to ydotool. Screenshot results include width/height for the returned image plus coordinate_width/coordinate_height and scale for desktop coordinate conversion; request more detail with max_width, max_height, max_bytes, format=jpeg, quality, or a smaller target/crop instead of relying on unbounded screenshots. Tools with readOnlyHint=false may mutate local desktop or application state; hosts should require approval for actions that can submit, delete, send, purchase, or overwrite data. For element-targeted actions, prefer element_index from the latest get_app_state result; click, perform_action, and set_value can also use semantic role/name/text/states selectors when the target is unique. type_text and press_key accept optional window_id, pid, app_id, wm_class, title, tty, terminal_pid, terminal_command, or terminal_cwd selectors and refuse targeted input if focus cannot be verified. After targeted keyboard input, results append best-effort focused-element feedback from AT-SPI (role, name, editable). A non-editable warning means field-level focus could not be confirmed; it is not proof that input failed, so verify visually or retry after clicking the intended field or using set_value. Screenshot, click, and input results warn when the target window or coordinate is partially or fully off-screen; use move_window/resize_window on a geometry-capable backend to bring it fully on-screen before retrying. scroll accepts the same window targeting and relative coordinates as click. get_app_state returns a compact readiness block by default; pass verbose=true for the full diagnostics dump. Electron apps expose no AT-SPI tree unless launched with --force-renderer-accessibility."
 )]
 impl ServerHandler for ComputerUseLinux {}
 
@@ -1427,6 +1880,12 @@ struct WindowGeometryOutput {
     permissions_hint: Option<String>,
     #[schemars(skip)]
     received: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum WindowGeometryRequest {
+    Move(i32, i32),
+    Resize(i32, i32),
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -1803,6 +2262,99 @@ struct DragParams {
     start_y: i32,
     end_x: i32,
     end_y: i32,
+    #[serde(default)]
+    window_id: Option<u64>,
+    #[serde(default)]
+    pid: Option<u32>,
+    #[serde(default)]
+    app_id: Option<String>,
+    #[serde(default)]
+    wm_class: Option<String>,
+    #[serde(default)]
+    window_title: Option<String>,
+    /// Interpret both endpoints as relative to the target window's top-left.
+    #[serde(default)]
+    relative: Option<bool>,
+}
+
+impl DragParams {
+    fn window_target(&self) -> Option<WindowTarget> {
+        if self.window_id.is_none()
+            && self.pid.is_none()
+            && self.app_id.is_none()
+            && self.wm_class.is_none()
+            && self.window_title.is_none()
+        {
+            return None;
+        }
+        Some(WindowTarget {
+            window_id: self.window_id,
+            pid: self.pid,
+            tty: None,
+            terminal_pid: None,
+            terminal_command: None,
+            terminal_cwd: None,
+            app_id: self.app_id.clone(),
+            wm_class: self.wm_class.clone(),
+            title: self.window_title.clone(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+struct PointerPathPoint {
+    x: i32,
+    y: i32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+struct DrawPathParams {
+    points: Vec<PointerPathPoint>,
+    #[serde(default = "default_path_point_delay_ms")]
+    point_delay_ms: u16,
+    #[serde(default)]
+    button: Option<String>,
+    #[serde(default)]
+    window_id: Option<u64>,
+    #[serde(default)]
+    pid: Option<u32>,
+    #[serde(default)]
+    app_id: Option<String>,
+    #[serde(default)]
+    wm_class: Option<String>,
+    #[serde(default)]
+    window_title: Option<String>,
+    /// Interpret every point as relative to the target window's top-left.
+    #[serde(default)]
+    relative: Option<bool>,
+}
+
+impl DrawPathParams {
+    fn window_target(&self) -> Option<WindowTarget> {
+        if self.window_id.is_none()
+            && self.pid.is_none()
+            && self.app_id.is_none()
+            && self.wm_class.is_none()
+            && self.window_title.is_none()
+        {
+            return None;
+        }
+        Some(WindowTarget {
+            window_id: self.window_id,
+            pid: self.pid,
+            tty: None,
+            terminal_pid: None,
+            terminal_command: None,
+            terminal_cwd: None,
+            app_id: self.app_id.clone(),
+            wm_class: self.wm_class.clone(),
+            title: self.window_title.clone(),
+        })
+    }
+}
+
+fn default_path_point_delay_ms() -> u16 {
+    12
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -1849,6 +2401,12 @@ struct TypeTextParams {
     wm_class: Option<String>,
     #[serde(default)]
     title: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct PinnedInputTarget {
+    target: WindowTarget,
+    terminal: bool,
 }
 
 impl PressKeyParams {
@@ -1904,6 +2462,14 @@ impl ComputerUseLinux {
             .is_some_and(|value| value.eq_ignore_ascii_case("wayland"))
     }
 
+    fn is_x11_session(&self) -> bool {
+        crate::diagnostics::hydrate_session_bus_env();
+        env::var("XDG_SESSION_TYPE")
+            .ok()
+            .is_some_and(|value| value.eq_ignore_ascii_case("x11"))
+            || (env::var_os("DISPLAY").is_some() && env::var_os("WAYLAND_DISPLAY").is_none())
+    }
+
     // The Wayland remote-desktop portal is now a *fallback* for input: when a
     // working `ydotoold` socket is present we prefer ydotool, because it injects
     // input without a permission prompt. GNOME refuses to persist remote-desktop
@@ -1945,11 +2511,52 @@ impl ComputerUseLinux {
         self.is_wayland_session() && !self.is_kde_wayland_session() && ydotool_socket().is_none()
     }
 
+    fn should_prefer_portal_key_chord_backend(&self) -> bool {
+        if env_flag_enabled_any(&[
+            "COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD",
+            "CODEX_COMPUTER_USE_FORCE_YDOTOOL_KEYBOARD",
+        ]) {
+            return false;
+        }
+        if env_flag_enabled_any(&[
+            "COMPUTER_USE_LINUX_FORCE_PORTAL_KEYBOARD",
+            "CODEX_COMPUTER_USE_FORCE_PORTAL_KEYBOARD",
+        ]) {
+            return self.is_wayland_session();
+        }
+        self.is_wayland_session() && ydotool_socket().is_none()
+    }
+
     fn should_prefer_kde_clipboard_text_backend(&self) -> bool {
         !env_flag_enabled_any(&[
             "COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD",
             "CODEX_COMPUTER_USE_FORCE_YDOTOOL_KEYBOARD",
         ]) && self.is_kde_wayland_session()
+    }
+
+    fn should_prefer_x11_clipboard_text_backend(&self) -> bool {
+        let forced_ydotool = env_flag_enabled_any(&[
+            "COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD",
+            "CODEX_COMPUTER_USE_FORCE_YDOTOOL_KEYBOARD",
+        ]);
+        x11_clipboard_backend_eligible(
+            forced_ydotool,
+            self.is_x11_session(),
+            command_succeeds("xdotool", &["--version"]),
+        )
+    }
+
+    async fn ensure_x11_clipboard(&self) -> std::result::Result<X11Clipboard, String> {
+        let mut cached = self.x11_clipboard.lock().await;
+        if let Some(clipboard) = cached.as_ref() {
+            return Ok(clipboard.clone());
+        }
+        let clipboard = tokio::task::spawn_blocking(X11Clipboard::connect)
+            .await
+            .map_err(|error| format!("X11 clipboard initialization task failed: {error}"))?
+            .map_err(|error| format!("X11 clipboard initialization failed: {error:#}"))?;
+        *cached = Some(clipboard.clone());
+        Ok(clipboard)
     }
 
     fn is_kde_wayland_session(&self) -> bool {
@@ -2103,6 +2710,39 @@ impl ComputerUseLinux {
         }
     }
 
+    async fn pin_input_target(
+        &self,
+        initial_focus: Option<&WindowFocusResult>,
+    ) -> Option<PinnedInputTarget> {
+        let window = match initial_focus {
+            Some(focus) => focus.requested_window.clone(),
+            None => focused_window().await.ok().flatten()?,
+        };
+        Some(PinnedInputTarget {
+            target: WindowTarget {
+                window_id: Some(window.window_id),
+                ..WindowTarget::default()
+            },
+            terminal: looks_like_terminal_window(&window),
+        })
+    }
+
+    async fn refocus_pinned_input_target(
+        &self,
+        pinned: Option<&PinnedInputTarget>,
+    ) -> std::result::Result<Option<WindowFocusResult>, String> {
+        let Some(pinned) = pinned else {
+            return Ok(None);
+        };
+        self.focus_target_for_input(&pinned.target)
+            .await?
+            .map(Some)
+            .ok_or_else(|| {
+                "Did not send input because the pinned target window could not be reverified."
+                    .to_string()
+            })
+    }
+
     fn cache_desktop_size(&self, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
@@ -2221,7 +2861,7 @@ impl ComputerUseLinux {
         match timeout(Duration::from_millis(1500), focused_element_summary(pid)).await {
             Ok(Ok(Some(element))) => Some(describe_focused_element(&element, expects_editable)),
             Ok(Ok(None)) => Some(
-                "WARNING: AT-SPI reports no focused element in the target app — the input may have landed nowhere. If this is an Electron app, launch it with --force-renderer-accessibility to expose its UI tree."
+                "WARNING: AT-SPI reports no focused element in the target app. Window-level focus was verified, but field-level delivery could not be confirmed; verify visually. If this is an Electron app, launch it with --force-renderer-accessibility to expose its UI tree."
                     .to_string(),
             ),
             Ok(Err(error)) => Some(format!(
@@ -2234,16 +2874,12 @@ impl ComputerUseLinux {
 
     /// Shared move/resize plumbing: resolve the window target, run the GNOME
     /// Shell extension operation, then re-query bounds to report the result.
-    async fn window_geometry_op<F, Fut>(
+    async fn window_geometry_op(
         &self,
         received: Option<serde_json::Value>,
         target: &WindowTarget,
-        op: F,
-    ) -> Json<WindowGeometryOutput>
-    where
-        F: FnOnce(u64) -> Fut,
-        Fut: Future<Output = Result<String>>,
-    {
+        request: WindowGeometryRequest,
+    ) -> Json<WindowGeometryOutput> {
         let windows = match list_windows().await {
             Ok(windows) => windows,
             Err(error) => {
@@ -2259,8 +2895,8 @@ impl ComputerUseLinux {
                 });
             }
         };
-        let window_id = match resolve_window_target(&windows, target) {
-            Ok(window) => window.window_id,
+        let target_window = match resolve_window_target(&windows, target) {
+            Ok(window) => window.clone(),
             Err(error) => {
                 return Json(WindowGeometryOutput {
                     ok: false,
@@ -2273,7 +2909,15 @@ impl ComputerUseLinux {
                 });
             }
         };
-        match op(window_id).await {
+        let backend = target_window.backend.clone();
+        let window_id = target_window.window_id;
+        let result = match request {
+            WindowGeometryRequest::Move(x, y) => registry::move_window(&target_window, x, y).await,
+            WindowGeometryRequest::Resize(width, height) => {
+                registry::resize_window(&target_window, width, height).await
+            }
+        };
+        match result {
             Ok(message) => {
                 // Re-query so the caller sees the compositor-final geometry
                 // (tiling constraints, minimum sizes, etc. may adjust it).
@@ -2291,7 +2935,7 @@ impl ComputerUseLinux {
                 Json(WindowGeometryOutput {
                     ok: true,
                     implemented: true,
-                    backend: crate::windowing::GNOME_SHELL_EXTENSION_BACKEND.to_string(),
+                    backend,
                     window,
                     message,
                     permissions_hint: None,
@@ -2303,7 +2947,7 @@ impl ComputerUseLinux {
                 Json(WindowGeometryOutput {
                     ok: false,
                     implemented: true,
-                    backend: crate::windowing::GNOME_SHELL_EXTENSION_BACKEND.to_string(),
+                    backend,
                     window: None,
                     permissions_hint: window_permission_hint(&error),
                     message: error,
@@ -3079,6 +3723,178 @@ fn apply_window_relative_scroll_coordinates(
     Ok(())
 }
 
+fn focused_or_requested_bounds(
+    focus: &WindowFocusResult,
+) -> Option<&crate::windowing::WindowBounds> {
+    focus
+        .focused_window
+        .as_ref()
+        .and_then(|window| window.bounds.as_ref())
+        .or(focus.requested_window.bounds.as_ref())
+}
+
+fn validate_exact_drag_focus(focus: &WindowFocusResult) -> std::result::Result<(), String> {
+    if focus.exact_window_focused {
+        Ok(())
+    } else {
+        Err(
+            "Targeted drag requires exact target-window focus verification; app-level focus is not sufficient for a pointer gesture."
+                .to_string(),
+        )
+    }
+}
+
+fn apply_window_relative_drag_coordinates(
+    params: &mut DragParams,
+    focus: &WindowFocusResult,
+) -> std::result::Result<(), String> {
+    let bounds = focused_or_requested_bounds(focus).ok_or_else(|| {
+        "Relative drag coordinates require resolved target-window bounds.".to_string()
+    })?;
+    if bounds.width == 0 || bounds.height == 0 {
+        return Err(
+            "Relative drag coordinates require non-empty target-window bounds.".to_string(),
+        );
+    }
+    let (origin_x, origin_y) = bounds.x.zip(bounds.y).ok_or_else(|| {
+        "Relative drag coordinates require target-window bounds with an origin.".to_string()
+    })?;
+    let endpoints = [
+        (params.start_x, params.start_y),
+        (params.end_x, params.end_y),
+    ];
+    if endpoints
+        .iter()
+        .any(|&(x, y)| x < 0 || y < 0 || x as u32 >= bounds.width || y as u32 >= bounds.height)
+    {
+        return Err(
+            "Both relative drag endpoints must be inside target-window bounds.".to_string(),
+        );
+    }
+
+    // Compute every translated coordinate before mutating `params`, so an
+    // overflow at either endpoint cannot leave a half-translated drag.
+    let translated_start_x = origin_x
+        .checked_add(params.start_x)
+        .ok_or_else(|| "Relative drag start x coordinate overflowed.".to_string())?;
+    let translated_start_y = origin_y
+        .checked_add(params.start_y)
+        .ok_or_else(|| "Relative drag start y coordinate overflowed.".to_string())?;
+    let translated_end_x = origin_x
+        .checked_add(params.end_x)
+        .ok_or_else(|| "Relative drag end x coordinate overflowed.".to_string())?;
+    let translated_end_y = origin_y
+        .checked_add(params.end_y)
+        .ok_or_else(|| "Relative drag end y coordinate overflowed.".to_string())?;
+
+    params.start_x = translated_start_x;
+    params.start_y = translated_start_y;
+    params.end_x = translated_end_x;
+    params.end_y = translated_end_y;
+    Ok(())
+}
+
+fn validate_absolute_drag_coordinates(
+    params: &DragParams,
+    focus: &WindowFocusResult,
+) -> std::result::Result<(), String> {
+    let bounds = focused_or_requested_bounds(focus)
+        .ok_or_else(|| "Targeted drag requires resolved target-window bounds.".to_string())?;
+    if bounds.width == 0 || bounds.height == 0 {
+        return Err("Targeted drag requires non-empty target-window bounds.".to_string());
+    }
+    let (origin_x, origin_y) = bounds
+        .x
+        .zip(bounds.y)
+        .ok_or_else(|| "Targeted drag requires target-window bounds with an origin.".to_string())?;
+    let max_x = i64::from(origin_x) + i64::from(bounds.width);
+    let max_y = i64::from(origin_y) + i64::from(bounds.height);
+    let endpoints = [
+        (params.start_x, params.start_y),
+        (params.end_x, params.end_y),
+    ];
+    if endpoints.iter().any(|&(x, y)| {
+        i64::from(x) < i64::from(origin_x)
+            || i64::from(y) < i64::from(origin_y)
+            || i64::from(x) >= max_x
+            || i64::from(y) >= max_y
+    }) {
+        return Err(
+            "Both targeted drag endpoints must be inside target-window bounds.".to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn apply_window_relative_path_coordinates(
+    params: &mut DrawPathParams,
+    focus: &WindowFocusResult,
+) -> std::result::Result<(), String> {
+    let bounds = focused_or_requested_bounds(focus).ok_or_else(|| {
+        "Relative draw_path coordinates require resolved target-window bounds.".to_string()
+    })?;
+    if bounds.width == 0 || bounds.height == 0 {
+        return Err(
+            "Relative draw_path coordinates require non-empty target-window bounds.".to_string(),
+        );
+    }
+    let (origin_x, origin_y) = bounds.x.zip(bounds.y).ok_or_else(|| {
+        "Relative draw_path coordinates require target-window bounds with an origin.".to_string()
+    })?;
+    if params.points.iter().any(|point| {
+        point.x < 0
+            || point.y < 0
+            || point.x as u32 >= bounds.width
+            || point.y as u32 >= bounds.height
+    }) {
+        return Err(
+            "Every relative draw_path point must be inside target-window bounds.".to_string(),
+        );
+    }
+    let translated = params
+        .points
+        .iter()
+        .map(|point| {
+            let x = origin_x
+                .checked_add(point.x)
+                .ok_or_else(|| "Relative draw_path x coordinate overflowed.".to_string())?;
+            let y = origin_y
+                .checked_add(point.y)
+                .ok_or_else(|| "Relative draw_path y coordinate overflowed.".to_string())?;
+            Ok((x, y))
+        })
+        .collect::<std::result::Result<Vec<_>, String>>()?;
+    for (point, (x, y)) in params.points.iter_mut().zip(translated) {
+        point.x = x;
+        point.y = y;
+    }
+    Ok(())
+}
+
+fn validate_absolute_path_coordinates(
+    points: &[PointerPathPoint],
+    focus: &WindowFocusResult,
+) -> std::result::Result<(), String> {
+    let bounds = focused_or_requested_bounds(focus)
+        .ok_or_else(|| "Targeted draw_path requires resolved target-window bounds.".to_string())?;
+    let (origin_x, origin_y) = bounds.x.zip(bounds.y).ok_or_else(|| {
+        "Targeted draw_path requires target-window bounds with an origin.".to_string()
+    })?;
+    let max_x = i64::from(origin_x) + i64::from(bounds.width);
+    let max_y = i64::from(origin_y) + i64::from(bounds.height);
+    if points.iter().any(|point| {
+        i64::from(point.x) < i64::from(origin_x)
+            || i64::from(point.y) < i64::from(origin_y)
+            || i64::from(point.x) >= max_x
+            || i64::from(point.y) >= max_y
+    }) {
+        return Err(
+            "Every targeted draw_path point must be inside target-window bounds.".to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Crop a PNG image to `(x, y, w, h)` (clamped to the image), returning the
 /// re-encoded PNG and the actual cropped dimensions.
 fn crop_png(
@@ -3184,7 +4000,7 @@ fn describe_focused_element(element: &FocusedElementSummary, expects_editable: b
         format!("Focused element: {}{name} (editable).", element.role)
     } else if expects_editable {
         format!(
-            "WARNING: focused element is {}{name}, which is not editable — the typed text likely went nowhere. Click the intended input first or use set_value.",
+            "WARNING: focused element is {}{name}, which AT-SPI does not report as editable. Window-level focus was verified, but field-level delivery could not be confirmed; verify visually, click the intended input, or use set_value.",
             element.role
         )
     } else {
@@ -3267,6 +4083,20 @@ fn wheel_mousemove_args(dx: i32, dy: i32) -> Vec<String> {
     ]
 }
 
+fn ydotool_pointer_button_masks(button: Option<&str>) -> Option<(&'static str, &'static str)> {
+    match button
+        .unwrap_or("left")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "left" => Some(("0x40", "0x80")),
+        "right" => Some(("0x10", "0x20")),
+        "middle" => Some(("0x04", "0x08")),
+        _ => None,
+    }
+}
+
 async fn run_ydotool_sequence(
     commands: &[Vec<String>],
 ) -> std::result::Result<Vec<Output>, String> {
@@ -3297,6 +4127,155 @@ async fn run_ydotool(args: &[String]) -> std::result::Result<Output, String> {
         },
         Err(error) => Err(format!("failed to run ydotool: {error}")),
     }
+}
+
+fn xdotool_paste_args(terminal: bool) -> [&'static str; 3] {
+    [
+        "key",
+        "--clearmodifiers",
+        if terminal { "ctrl+shift+v" } else { "ctrl+v" },
+    ]
+}
+
+fn xdotool_key_chord(key: &str) -> Option<String> {
+    let parts = key
+        .split('+')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    let (key_part, modifier_parts) = parts.split_last()?;
+    let mut canonical = modifier_parts
+        .iter()
+        .map(|modifier| match normalize_key(modifier).as_str() {
+            "ctrl" | "control" => Some("ctrl"),
+            "alt" | "option" => Some("alt"),
+            "shift" => Some("shift"),
+            "meta" | "super" | "cmd" | "command" => Some("super"),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    canonical.push(xdotool_key_name(key_part)?);
+    Some(canonical.join("+"))
+}
+
+fn xdotool_key_name(key: &str) -> Option<&'static str> {
+    match normalize_key(key).as_str() {
+        "ctrl" | "control" => Some("ctrl"),
+        "alt" | "option" => Some("alt"),
+        "shift" => Some("shift"),
+        "meta" | "super" | "cmd" | "command" => Some("super"),
+        "enter" | "return" => Some("Return"),
+        "escape" | "esc" => Some("Escape"),
+        "tab" => Some("Tab"),
+        "backspace" => Some("BackSpace"),
+        "delete" | "del" => Some("Delete"),
+        "space" => Some("space"),
+        "home" => Some("Home"),
+        "end" => Some("End"),
+        "pageup" | "page_up" => Some("Page_Up"),
+        "pagedown" | "page_down" => Some("Page_Down"),
+        "arrowleft" | "left" => Some("Left"),
+        "arrowright" | "right" => Some("Right"),
+        "arrowup" | "up" => Some("Up"),
+        "arrowdown" | "down" => Some("Down"),
+        "f1" => Some("F1"),
+        "f2" => Some("F2"),
+        "f3" => Some("F3"),
+        "f4" => Some("F4"),
+        "f5" => Some("F5"),
+        "f6" => Some("F6"),
+        "f7" => Some("F7"),
+        "f8" => Some("F8"),
+        "f9" => Some("F9"),
+        "f10" => Some("F10"),
+        "f11" => Some("F11"),
+        "f12" => Some("F12"),
+        value if value.len() == 1 && value.as_bytes()[0].is_ascii_alphanumeric() => {
+            const ASCII_KEY_NAMES: [&str; 36] = [
+                "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f",
+                "g", "h", "i", "j", "k", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v",
+                "w", "x", "y", "z",
+            ];
+            ASCII_KEY_NAMES
+                .iter()
+                .copied()
+                .find(|candidate| *candidate == value)
+        }
+        _ => None,
+    }
+}
+
+async fn run_xdotool_key(key: &str) -> std::result::Result<(), String> {
+    let mut command = TokioCommand::new("xdotool");
+    command
+        .args(["key", "--clearmodifiers", key])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let output = timeout(XDOTOOL_TIMEOUT, command.output())
+        .await
+        .map_err(|_| format!("xdotool timed out after {}s", XDOTOOL_TIMEOUT.as_secs()))?
+        .map_err(|error| format!("failed to run xdotool: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(command_output_error("xdotool", output))
+    }
+}
+
+async fn paste_with_xdotool(terminal: bool) -> std::result::Result<(), String> {
+    let mut command = TokioCommand::new("xdotool");
+    command
+        .args(xdotool_paste_args(terminal))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let output = command
+        .output()
+        .await
+        .map_err(|error| format!("failed to run xdotool: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(command_output_error("xdotool", output))
+    }
+}
+
+fn x11_clipboard_backend_eligible(
+    forced_ydotool: bool,
+    is_x11_session: bool,
+    xdotool_available: bool,
+) -> bool {
+    !forced_ydotool && is_x11_session && xdotool_available
+}
+
+fn command_succeeds(command: &str, args: &[&str]) -> bool {
+    Command::new(command)
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn x11_clipboard_success_message(report: &X11ClipboardPasteReport) -> String {
+    let restoration = match &report.restoration {
+        ClipboardRestoration::RestoredText => "Previous text clipboard contents were restored.",
+        ClipboardRestoration::RestoredUnowned => "The previously unowned clipboard was restored.",
+        ClipboardRestoration::SkippedClipboardChanged { .. } => {
+            "The clipboard changed during paste, so the newer contents were preserved."
+        }
+        ClipboardRestoration::Failed(error) => {
+            return format!(
+                "Pasted {} UTF-8 bytes through native X11 clipboard integration. Warning: previous clipboard restoration failed: {error}",
+                report.bytes
+            );
+        }
+    };
+    format!(
+        "Pasted {} UTF-8 bytes through native X11 clipboard integration. {restoration}",
+        report.bytes
+    )
 }
 
 async fn run_ydotool_type_text(text: &str) -> std::result::Result<Output, String> {
@@ -3380,6 +4359,7 @@ fn ydotool_type_timeout(text: &str) -> Duration {
 }
 
 const EVDEV_KEY_LEFTCTRL: i32 = 29;
+const EVDEV_KEY_LEFTSHIFT: i32 = 42;
 const EVDEV_KEY_V: i32 = 47;
 const KDE_CLIPBOARD_RESTORE_MIN_DELAY_MS: u64 = 1_500;
 const KDE_CLIPBOARD_RESTORE_MAX_DELAY_MS: u64 = 5_000;
@@ -3423,6 +4403,7 @@ impl KdeClipboardPasteError {
 async fn run_kde_clipboard_paste_text(
     session: &PortalKeyboardSession,
     text: &str,
+    terminal_paste: bool,
 ) -> std::result::Result<String, KdeClipboardPasteError> {
     let previous = kde_clipboard_contents()
         .await
@@ -3431,16 +4412,31 @@ async fn run_kde_clipboard_paste_text(
         .await
         .map_err(KdeClipboardPasteError::before_text_input)?;
 
-    let paste_result = press_keycode_chord(session, &[EVDEV_KEY_LEFTCTRL], EVDEV_KEY_V)
+    let (paste_modifiers, paste_key) = if terminal_paste {
+        (&[EVDEV_KEY_LEFTCTRL, EVDEV_KEY_LEFTSHIFT][..], EVDEV_KEY_V)
+    } else {
+        (&[EVDEV_KEY_LEFTCTRL][..], EVDEV_KEY_V)
+    };
+    let paste_result = press_keycode_chord(session, paste_modifiers, paste_key)
         .await
         .map_err(|error| format!("{error:#}"));
 
     sleep(kde_clipboard_restore_delay(text)).await;
-    let restore_result = kde_set_clipboard_contents(&previous).await;
+    let restore_result = restore_kde_clipboard_if_unchanged(text, &previous).await;
 
     match (paste_result, restore_result) {
-        (Ok(_), Ok(_)) => Ok("Action pasted through KDE clipboard integration.".to_string()),
-        (Err(error), Ok(_)) => Err(KdeClipboardPasteError::after_portal_input(error)),
+        (Ok(_), Ok(true)) => Ok("Action pasted through KDE clipboard integration.".to_string()),
+        (Ok(_), Ok(false)) => Ok(
+            "Action pasted through KDE clipboard integration. The clipboard changed during paste, so the newer contents were preserved."
+                .to_string(),
+        ),
+        (Err(error), Ok(restored)) => Err(KdeClipboardPasteError::after_portal_input(
+            if restored {
+                error
+            } else {
+                format!("{error}; the clipboard changed during paste, so the newer contents were preserved")
+            },
+        )),
         (Ok(_), Err(restore_error)) => Ok(format!(
             "Action pasted through KDE clipboard integration. Warning: previous KDE clipboard contents could not be restored: {restore_error}"
         )),
@@ -3448,6 +4444,22 @@ async fn run_kde_clipboard_paste_text(
             format!("{error}; previous KDE clipboard contents could not be restored: {restore_error}"),
         )),
     }
+}
+
+async fn restore_kde_clipboard_if_unchanged(
+    temporary: &str,
+    previous: &str,
+) -> std::result::Result<bool, String> {
+    let current = kde_clipboard_contents().await?;
+    if !kde_clipboard_can_restore(&current, temporary) {
+        return Ok(false);
+    }
+    kde_set_clipboard_contents(previous).await?;
+    Ok(true)
+}
+
+fn kde_clipboard_can_restore(current: &str, temporary: &str) -> bool {
+    current == temporary
 }
 
 async fn kde_clipboard_contents() -> std::result::Result<String, String> {
@@ -3589,22 +4601,7 @@ fn mouse_button_code(button: Option<&str>) -> String {
 }
 
 fn key_sequence(key: &str) -> Option<Vec<String>> {
-    let parts = key
-        .split('+')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-    let (key_part, modifier_parts) = parts.split_last()?;
-    if modifier_parts.is_empty() {
-        if let Some(modifier) = modifier_keycode(key_part) {
-            return Some(vec![format!("{modifier}:1"), format!("{modifier}:0")]);
-        }
-    }
-    let mut modifiers = Vec::new();
-    for part in modifier_parts {
-        modifiers.push(modifier_keycode(part)?);
-    }
-    let keycode = keycode(key_part)?;
+    let (modifiers, keycode) = key_chord(key)?;
 
     let mut events = Vec::new();
     for modifier in &modifiers {
@@ -3616,6 +4613,26 @@ fn key_sequence(key: &str) -> Option<Vec<String>> {
         events.push(format!("{modifier}:0"));
     }
     Some(events)
+}
+
+fn key_chord(key: &str) -> Option<(Vec<u16>, u16)> {
+    let parts = key
+        .split('+')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    let (key_part, modifier_parts) = parts.split_last()?;
+    if modifier_parts.is_empty() {
+        if let Some(modifier) = modifier_keycode(key_part) {
+            return Some((Vec::new(), modifier));
+        }
+    }
+    let mut modifiers = Vec::new();
+    for part in modifier_parts {
+        modifiers.push(modifier_keycode(part)?);
+    }
+    let keycode = keycode(key_part)?;
+    Some((modifiers, keycode))
 }
 
 fn modifier_keycode(key: &str) -> Option<u16> {
@@ -3941,6 +4958,185 @@ mod tests {
         assert_eq!((params.x, params.y), (Some(107), Some(209)));
     }
 
+    fn draw_path_params(points: &[(i32, i32)]) -> DrawPathParams {
+        DrawPathParams {
+            points: points
+                .iter()
+                .map(|&(x, y)| PointerPathPoint { x, y })
+                .collect(),
+            point_delay_ms: default_path_point_delay_ms(),
+            button: None,
+            window_id: Some(42),
+            pid: None,
+            app_id: None,
+            wm_class: None,
+            window_title: None,
+            relative: Some(true),
+        }
+    }
+
+    fn drag_params(start: (i32, i32), end: (i32, i32)) -> DragParams {
+        DragParams {
+            start_x: start.0,
+            start_y: start.1,
+            end_x: end.0,
+            end_y: end.1,
+            window_id: Some(42),
+            pid: None,
+            app_id: None,
+            wm_class: None,
+            window_title: None,
+            relative: Some(true),
+        }
+    }
+
+    #[test]
+    fn drag_window_target_preserves_every_supported_selector() {
+        let mut params = drag_params((1, 2), (3, 4));
+        params.pid = Some(4242);
+        params.app_id = Some("target-app".to_string());
+        params.wm_class = Some("TargetClass".to_string());
+        params.window_title = Some("Target Window".to_string());
+
+        let target = params.window_target().unwrap();
+
+        assert_eq!(target.window_id, Some(42));
+        assert_eq!(target.pid, Some(4242));
+        assert_eq!(target.app_id.as_deref(), Some("target-app"));
+        assert_eq!(target.wm_class.as_deref(), Some("TargetClass"));
+        assert_eq!(target.title.as_deref(), Some("Target Window"));
+    }
+
+    #[test]
+    fn drag_schema_exposes_window_targeting_and_relative_coordinates() {
+        let schema = serde_json::to_value(schemars::schema_for!(DragParams)).unwrap();
+
+        for property in [
+            "window_id",
+            "pid",
+            "app_id",
+            "wm_class",
+            "window_title",
+            "relative",
+        ] {
+            assert!(
+                schema.pointer(&format!("/properties/{property}")).is_some(),
+                "drag schema did not expose {property}"
+            );
+        }
+    }
+
+    #[test]
+    fn targeted_drag_requires_exact_window_focus() {
+        let exact = focus_result_with_bounds(Some(window_bounds(Some(100), Some(200), 800, 600)));
+        validate_exact_drag_focus(&exact).unwrap();
+
+        let mut app_level_only = exact;
+        app_level_only.exact_window_focused = false;
+        app_level_only.app_focused = true;
+        let error = validate_exact_drag_focus(&app_level_only).unwrap_err();
+
+        assert!(error.contains("exact target-window focus"));
+    }
+
+    #[test]
+    fn relative_drag_translates_both_endpoints_atomically() {
+        let focus = focus_result_with_bounds(Some(window_bounds(Some(100), Some(200), 800, 600)));
+        let mut params = drag_params((0, 0), (799, 599));
+
+        apply_window_relative_drag_coordinates(&mut params, &focus).unwrap();
+
+        assert_eq!(
+            (params.start_x, params.start_y, params.end_x, params.end_y),
+            (100, 200, 899, 799)
+        );
+    }
+
+    #[test]
+    fn relative_drag_rejects_out_of_bounds_endpoint_without_mutation() {
+        let focus = focus_result_with_bounds(Some(window_bounds(Some(100), Some(200), 800, 600)));
+        let mut params = drag_params((10, 20), (800, 30));
+
+        let error = apply_window_relative_drag_coordinates(&mut params, &focus).unwrap_err();
+
+        assert!(error.contains("Both relative drag endpoints"));
+        assert_eq!(
+            (params.start_x, params.start_y, params.end_x, params.end_y),
+            (10, 20, 800, 30)
+        );
+    }
+
+    #[test]
+    fn relative_drag_overflow_does_not_partially_translate() {
+        let focus =
+            focus_result_with_bounds(Some(window_bounds(Some(i32::MAX), Some(200), 2, 600)));
+        let mut params = drag_params((0, 0), (1, 1));
+
+        let error = apply_window_relative_drag_coordinates(&mut params, &focus).unwrap_err();
+
+        assert!(error.contains("end x coordinate overflowed"));
+        assert_eq!(
+            (params.start_x, params.start_y, params.end_x, params.end_y),
+            (0, 0, 1, 1)
+        );
+    }
+
+    #[test]
+    fn targeted_absolute_drag_requires_both_endpoints_inside_window() {
+        let focus = focus_result_with_bounds(Some(window_bounds(Some(100), Some(200), 800, 600)));
+        let mut inside = drag_params((100, 200), (899, 799));
+        inside.relative = Some(false);
+        let mut outside = drag_params((100, 200), (900, 799));
+        outside.relative = Some(false);
+
+        validate_absolute_drag_coordinates(&inside, &focus).unwrap();
+        let error = validate_absolute_drag_coordinates(&outside, &focus).unwrap_err();
+        assert!(error.contains("Both targeted drag endpoints"));
+    }
+
+    #[test]
+    fn relative_draw_path_translates_every_point_atomically() {
+        let focus = focus_result_with_bounds(Some(window_bounds(Some(100), Some(200), 800, 600)));
+        let mut params = draw_path_params(&[(0, 0), (400, 300), (799, 599)]);
+
+        apply_window_relative_path_coordinates(&mut params, &focus).unwrap();
+
+        let points = params
+            .points
+            .iter()
+            .map(|point| (point.x, point.y))
+            .collect::<Vec<_>>();
+        assert_eq!(points, vec![(100, 200), (500, 500), (899, 799)]);
+    }
+
+    #[test]
+    fn relative_draw_path_rejects_any_out_of_bounds_point_without_mutation() {
+        let focus = focus_result_with_bounds(Some(window_bounds(Some(100), Some(200), 800, 600)));
+        let mut params = draw_path_params(&[(10, 20), (800, 20)]);
+
+        let error = apply_window_relative_path_coordinates(&mut params, &focus).unwrap_err();
+
+        assert!(error.contains("Every relative draw_path point"));
+        assert_eq!(params.points[0].x, 10);
+        assert_eq!(params.points[0].y, 20);
+    }
+
+    #[test]
+    fn targeted_absolute_draw_path_rejects_points_outside_window() {
+        let focus = focus_result_with_bounds(Some(window_bounds(Some(100), Some(200), 800, 600)));
+        let inside = vec![
+            PointerPathPoint { x: 100, y: 200 },
+            PointerPathPoint { x: 899, y: 799 },
+        ];
+        let outside = vec![
+            PointerPathPoint { x: 100, y: 200 },
+            PointerPathPoint { x: 900, y: 799 },
+        ];
+
+        validate_absolute_path_coordinates(&inside, &focus).unwrap();
+        assert!(validate_absolute_path_coordinates(&outside, &focus).is_err());
+    }
+
     #[test]
     fn relative_click_coordinates_prefer_focused_window_bounds() {
         let mut focus =
@@ -4255,6 +5451,12 @@ mod tests {
         );
     }
 
+    #[test]
+    fn kde_clipboard_restoration_preserves_concurrent_user_copy() {
+        assert!(kde_clipboard_can_restore("temporary", "temporary"));
+        assert!(!kde_clipboard_can_restore("new user copy", "temporary"));
+    }
+
     #[tokio::test]
     async fn kde_clipboard_dbus_operation_times_out_when_pending() {
         let error = kde_clipboard_dbus_operation_with_timeout(
@@ -4504,6 +5706,20 @@ mod tests {
     }
 
     #[test]
+    fn draw_path_ydotool_masks_match_requested_button() {
+        assert_eq!(ydotool_pointer_button_masks(None), Some(("0x40", "0x80")));
+        assert_eq!(
+            ydotool_pointer_button_masks(Some("RIGHT")),
+            Some(("0x10", "0x20"))
+        );
+        assert_eq!(
+            ydotool_pointer_button_masks(Some("middle")),
+            Some(("0x04", "0x08"))
+        );
+        assert_eq!(ydotool_pointer_button_masks(Some("side")), None);
+    }
+
+    #[test]
     fn pointer_actions_keep_pixel_coordinates_for_ydotool_absolute_moves() {
         assert_eq!(
             absolute_mousemove_args(1550, 930),
@@ -4530,6 +5746,11 @@ mod tests {
                 "29:0".to_string(),
             ])
         );
+        assert_eq!(key_chord("Ctrl+Shift+P"), Some((vec![29, 42], 25)));
+        assert_eq!(
+            xdotool_key_chord("Ctrl+Shift+P").as_deref(),
+            Some("ctrl+shift+p")
+        );
     }
 
     #[test]
@@ -4538,6 +5759,8 @@ mod tests {
             key_sequence("Super"),
             Some(vec!["125:1".to_string(), "125:0".to_string()])
         );
+        assert_eq!(key_chord("Super"), Some((Vec::new(), 125)));
+        assert_eq!(xdotool_key_chord("Super").as_deref(), Some("super"));
     }
 
     #[test]
@@ -4840,7 +6063,43 @@ mod tests {
         };
         let described = describe_focused_element(&element, true);
         assert!(described.contains("WARNING"));
-        assert!(described.contains("not editable"));
+        assert!(described.contains("does not report as editable"));
+        assert!(described.contains("Window-level focus was verified"));
+        assert!(described.contains("field-level delivery could not be confirmed"));
+        assert!(!described.contains("likely went nowhere"));
+    }
+
+    #[test]
+    fn agent_instructions_describe_unicode_and_uncertain_focus_feedback() {
+        let instructions = ComputerUseLinux::default()
+            .get_info()
+            .instructions
+            .expect("Computer Use server instructions");
+
+        assert!(instructions.contains("transactional native X11 clipboard"));
+        assert!(instructions.contains("xdotool paste chord"));
+        assert!(instructions.contains("it is not proof that input failed"));
+        assert!(!instructions.contains("treat that warning as the input not landing"));
+    }
+
+    #[test]
+    fn x11_clipboard_backend_requires_x11_xdotool_and_no_forced_fallback() {
+        assert!(x11_clipboard_backend_eligible(false, true, true));
+        assert!(!x11_clipboard_backend_eligible(true, true, true));
+        assert!(!x11_clipboard_backend_eligible(false, false, true));
+        assert!(!x11_clipboard_backend_eligible(false, true, false));
+    }
+
+    #[test]
+    fn x11_clipboard_paste_clears_stale_modifiers() {
+        assert_eq!(
+            xdotool_paste_args(false),
+            ["key", "--clearmodifiers", "ctrl+v"]
+        );
+        assert_eq!(
+            xdotool_paste_args(true),
+            ["key", "--clearmodifiers", "ctrl+shift+v"]
+        );
     }
 
     #[test]

@@ -3,7 +3,7 @@
 Run ChatGPT Desktop for Linux directly with:
 
 ```bash
-nix run github:ilysenko/codex-desktop-linux
+nix run github:alingold/codex-desktop-linux
 ```
 
 The flake handles dependencies and patches Electron for NixOS. A GitHub Actions
@@ -176,20 +176,23 @@ hermetically.
 Remote mobile control:
 
 ```bash
-nix run github:ilysenko/codex-desktop-linux#remote-mobile-control
+nix run github:alingold/codex-desktop-linux#remote-mobile-control
 ```
 
 Computer Use UI plus remote mobile control:
 
 ```bash
-nix run github:ilysenko/codex-desktop-linux#computer-use-ui-remote-mobile-control
+nix run github:alingold/codex-desktop-linux#computer-use-ui-remote-mobile-control
 ```
 
 Computer Use UI only:
 
 ```bash
-nix run github:ilysenko/codex-desktop-linux#codex-desktop-computer-use-ui
+nix run github:alingold/codex-desktop-linux#codex-desktop-computer-use-ui
 ```
+
+The Computer Use UI outputs include `xdotool` on the application launcher
+`PATH` for full-Unicode X11 text entry. The base output remains unchanged.
 
 The Home Manager and NixOS modules accept these feature IDs through
 `programs.codexDesktopLinux.linuxFeatures`:
@@ -251,7 +254,7 @@ configurations that prefer a global user unit.
 ## Development Shell
 
 ```bash
-nix develop github:ilysenko/codex-desktop-linux
+nix develop github:alingold/codex-desktop-linux
 ```
 
 ## Cachix

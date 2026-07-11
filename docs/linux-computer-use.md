@@ -8,13 +8,65 @@ It supports:
 
 - app listing and accessibility trees through AT-SPI
 - screenshots through GNOME Shell DBus, the Codex GNOME Shell extension, or XDG Desktop Portal
-- window listing and focusing on GNOME, KWin/Plasma, Hyprland, COSMIC, and i3
-- keyboard, text, click, scroll, and drag input through `/dev/uinput`, XDG
+- window listing and focusing on GNOME, KWin/Plasma, Hyprland, COSMIC, i3,
+  and EWMH-compliant X11 desktops including Cinnamon, MATE, and XFCE
+- keyboard, click, scroll, and drag input through `/dev/uinput`, XDG
   RemoteDesktop portal, or `ydotool`
+- full-Unicode X11 text entry through a transactional native clipboard path;
+  plain-text clipboard contents are restored and `xdotool` sends only the
+  paste chord (`Ctrl+Shift+V` for recognized terminals)
+- continuous multi-point drawing gestures for handwriting, curves, and lassos
+- exact-focus, window-relative drags and drawing paths that reject any
+  out-of-bounds endpoint or point before sending pointer input
+- exact X11 window activation plus EWMH move/resize control on Cinnamon, MATE,
+  XFCE, and compatible window managers
+- application-focused X11 discovery that omits desktop, dock, notification,
+  splash, and taskbar/pager-hidden utility surfaces
+
+Window move/resize behavior is backend-specific:
+
+- KWin applies requested frame geometry and verifies the resulting bounds
+- Hyprland dispatches exact pixel geometry and verifies the result
+- i3 applies exact geometry only when the current layout/container permits it,
+  which normally means a floating window
+- the COSMIC helper currently has no window-geometry protocol, so move/resize
+  remains unavailable there
 
 ## Runtime Dependencies
 
-Install `ydotool` when you need the fallback input path:
+On X11, install `xdotool` for reliable full-Unicode text entry. It sends a
+modifier-clean paste chord while the Rust backend temporarily owns the X11
+clipboard selection; it is not used to store or retrieve the text itself:
+
+```bash
+# Debian / Ubuntu
+sudo apt install xdotool
+
+# Fedora
+sudo dnf install xdotool
+
+# Arch / Manjaro
+sudo pacman -S xdotool
+
+# openSUSE
+sudo zypper install xdotool
+```
+
+The deb and RPM packages recommend `xdotool`, and the Arch package lists it as
+an optional dependency. Nix Computer Use UI outputs place `xdotool` on the app
+launcher `PATH`; the base Nix output does not add it.
+
+If `xdotool` is absent, X11 text entry falls back safely to the regular
+keyboard backend before changing the clipboard. Install `ydotool` when you
+need that global fallback input path for keyboard and pointer actions:
+
+The transaction compares and claims clipboard ownership atomically, restores
+only while it still owns the temporary selection, and preserves a newer user
+copy. Because the current owner implementation can faithfully restore one
+plain-text payload but not HTML, images, URI lists, or application-specific
+formats, mixed/rich clipboards are deliberately left untouched. Non-ASCII
+`type_text` then returns an explicit error instead of silently degrading the
+clipboard; `set_value` remains available for an exposed editable AT-SPI field.
 
 ```bash
 # Debian / Ubuntu
@@ -31,8 +83,11 @@ sudo pacman -S ydotool
 sudo zypper install ydotool
 ```
 
-The preferred coordinate input path opens `/dev/uinput` directly. The XDG
-RemoteDesktop portal can also provide input on desktops that expose it.
+The preferred coordinate input path opens `/dev/uinput` directly; that device
+is pointer-only in this backend and does not by itself make keyboard input
+ready. The XDG RemoteDesktop portal can provide both on desktops that expose
+it. Targeted keyboard actions pin the resolved window and reverify it
+immediately before delivery.
 
 For `ydotool`, run a daemon and make sure your user can access the socket:
 
@@ -72,6 +127,20 @@ You can also run the backend directly:
 ./codex-app/resources/plugins/openai-bundled/plugins/computer-use/bin/codex-computer-use-linux screenshot
 ```
 
+The guided setup can discover an installed, staged, cached, or `PATH` backend,
+run the doctor with a bounded timeout, and reduce its JSON report to a
+ready/degraded checklist:
+
+```bash
+CODEX_BOOTSTRAP_RUN_COMPUTER_USE_DOCTOR=1 make setup-native
+```
+
+This verification is read-only. It does not run the mutating `setup` or
+`setup-window-targeting` commands, install packages, start services, or change
+device/group permissions. A `READY` result requires accessibility, window
+querying, exact focus, input, and a screenshot backend; `DEGRADED` includes the
+detected blockers and recommended next step.
+
 ## Enable The In-App UI
 
 Ad hoc, for one build:
@@ -83,12 +152,20 @@ CODEX_LINUX_ENABLE_COMPUTER_USE_UI=1 make build-app
 Persistent, including future auto-updater rebuilds:
 
 ```bash
-mkdir -p ~/.config/codex-desktop
-echo '{"codex-linux-computer-use-ui-enabled": true}' > ~/.config/codex-desktop/settings.json
+CODEX_BOOTSTRAP_COMPUTER_USE_UI=1 make setup-native
 ```
 
-To opt back out, unset the env var and remove the settings flag or set it to
-`false`.
+This validates and atomically merges the flag into the app's `settings.json`,
+preserving unrelated settings. It refuses to overwrite malformed JSON. To opt
+back out persistently:
+
+```bash
+CODEX_BOOTSTRAP_COMPUTER_USE_UI=0 make setup-native
+```
+
+Unset the ad-hoc build environment variable as well if you used it. Persistent
+UI changes apply after rebuilding/reinstalling and do not bypass unrelated
+upstream server-side availability.
 
 Nix:
 
