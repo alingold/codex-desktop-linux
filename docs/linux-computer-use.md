@@ -15,8 +15,8 @@ It supports:
 - full-Unicode X11 text entry through a transactional native clipboard path;
   the previous clipboard is restored and `xdotool` sends only the paste chord
 - continuous multi-point drawing gestures for handwriting, curves, and lassos
-- focus-verified, window-relative drawing paths that reject out-of-bounds
-  points before sending any input
+- exact-focus, window-relative drags and drawing paths that reject any
+  out-of-bounds endpoint or point before sending pointer input
 - exact X11 window activation plus EWMH move/resize control on Cinnamon, MATE,
   XFCE, and compatible window managers
 - application-focused X11 discovery that omits desktop, dock, notification,

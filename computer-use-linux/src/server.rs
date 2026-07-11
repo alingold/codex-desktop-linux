@@ -1001,7 +1001,7 @@ impl ComputerUseLinux {
 
     #[tool(
         name = "drag",
-        description = "Drag from one point to another using pixel coordinates.",
+        description = "Drag from one point to another using pixel coordinates. With a window target, exact focus is verified and both endpoints must remain inside that window. Set relative=true to use window-cropped screenshot coordinates.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -1009,8 +1009,80 @@ impl ComputerUseLinux {
             open_world_hint = true
         )
     )]
-    async fn drag(&self, Parameters(params): Parameters<DragParams>) -> Json<ActionOutput> {
-        let received = Some(serde_json::json!(params));
+    async fn drag(&self, Parameters(mut params): Parameters<DragParams>) -> Json<ActionOutput> {
+        let received = Some(serde_json::json!(params.clone()));
+        let window_target = params.window_target();
+        if params.relative == Some(true) && window_target.is_none() {
+            return Json(ActionOutput {
+                ok: false,
+                implemented: true,
+                action: "drag".to_string(),
+                message: "Relative drag coordinates require a window target.".to_string(),
+                received,
+            });
+        }
+
+        let mut focus = None;
+        if let Some(target) = window_target {
+            focus = match self.focus_target_for_input(&target).await {
+                Ok(focus) => focus,
+                Err(message) => {
+                    return Json(ActionOutput {
+                        ok: false,
+                        implemented: true,
+                        action: "drag".to_string(),
+                        message,
+                        received,
+                    });
+                }
+            };
+            let Some(verified_focus) = focus.as_ref() else {
+                return Json(ActionOutput {
+                    ok: false,
+                    implemented: true,
+                    action: "drag".to_string(),
+                    message: "Targeted drag requires verified target-window focus.".to_string(),
+                    received,
+                });
+            };
+            if let Err(message) = validate_exact_drag_focus(verified_focus) {
+                return Json(ActionOutput {
+                    ok: false,
+                    implemented: true,
+                    action: "drag".to_string(),
+                    message,
+                    received,
+                });
+            }
+            let validation = if params.relative == Some(true) {
+                apply_window_relative_drag_coordinates(&mut params, verified_focus)
+            } else {
+                validate_absolute_drag_coordinates(&params, verified_focus)
+            };
+            if let Err(message) = validation {
+                return Json(ActionOutput {
+                    ok: false,
+                    implemented: true,
+                    action: "drag".to_string(),
+                    message,
+                    received,
+                });
+            }
+        }
+
+        // Snapshot the fully validated coordinates before initializing any
+        // pointer backend. Relative translation is all-or-nothing, so a bad
+        // endpoint cannot leave a partially transformed gesture behind.
+        let (start_x, start_y, end_x, end_y) =
+            (params.start_x, params.start_y, params.end_x, params.end_y);
+        let off_screen_note = match focus
+            .as_ref()
+            .and_then(|focus| focused_or_requested_bounds(focus))
+        {
+            Some(bounds) => self.off_screen_note_for_bounds(bounds).await,
+            None => None,
+        };
+
         // Preferred backend: the uinput absolute pointer (accurate landing).
         if self.ensure_abs_pointer().await {
             let abs_pointer = Arc::clone(&self.abs_pointer);
@@ -1018,8 +1090,8 @@ impl ComputerUseLinux {
                 if let Ok(mut guard) = abs_pointer.lock() {
                     guard.as_mut().map(|p| {
                         p.drag(
-                            (params.start_x, params.start_y),
-                            (params.end_x, params.end_y),
+                            (start_x, start_y),
+                            (end_x, end_y),
                             crate::abs_pointer::PointerButton::Left,
                         )
                         .is_ok()
@@ -1032,70 +1104,65 @@ impl ComputerUseLinux {
             .ok()
             .flatten();
             if dragged == Some(true) {
-                return Json(ActionOutput {
-                    ok: true,
-                    implemented: true,
-                    action: "drag".to_string(),
-                    message: "Action sent through the uinput absolute pointer.".to_string(),
-                    received,
-                });
+                return Json(with_notes(
+                    successful_action_with_focus(
+                        "drag",
+                        "Action sent through the uinput absolute pointer.",
+                        received,
+                        focus.clone(),
+                    ),
+                    off_screen_note.clone(),
+                ));
             }
         }
         if let Some(session) = self.cached_portal_pointer_session() {
-            match portal_drag(
-                &session,
-                params.start_x,
-                params.start_y,
-                params.end_x,
-                params.end_y,
-            )
-            .await
-            {
+            match portal_drag(&session, start_x, start_y, end_x, end_y).await {
                 Ok(()) => {
-                    return Json(ActionOutput {
-                        ok: true,
-                        implemented: true,
-                        action: "drag".to_string(),
-                        message: "Action sent through the remote desktop portal.".to_string(),
-                        received,
-                    });
+                    return Json(with_notes(
+                        successful_action_with_focus(
+                            "drag",
+                            "Action sent through the remote desktop portal.",
+                            received,
+                            focus.clone(),
+                        ),
+                        off_screen_note.clone(),
+                    ));
                 }
                 Err(_) => self.clear_portal_pointer_session(),
             }
         } else if self.should_prefer_portal_pointer_backend() {
             match self.ensure_portal_pointer_session().await {
-                Ok(Some(session)) => match portal_drag(
-                    &session,
-                    params.start_x,
-                    params.start_y,
-                    params.end_x,
-                    params.end_y,
-                )
-                .await
-                {
-                    Ok(()) => {
-                        return Json(ActionOutput {
-                            ok: true,
-                            implemented: true,
-                            action: "drag".to_string(),
-                            message: "Action sent through the remote desktop portal.".to_string(),
-                            received,
-                        });
+                Ok(Some(session)) => {
+                    match portal_drag(&session, start_x, start_y, end_x, end_y).await {
+                        Ok(()) => {
+                            return Json(with_notes(
+                                successful_action_with_focus(
+                                    "drag",
+                                    "Action sent through the remote desktop portal.",
+                                    received,
+                                    focus.clone(),
+                                ),
+                                off_screen_note.clone(),
+                            ));
+                        }
+                        Err(_) => self.clear_portal_pointer_session(),
                     }
-                    Err(_) => self.clear_portal_pointer_session(),
-                },
+                }
                 Ok(None) => {}
                 Err(_) => {}
             }
         }
         let result = run_ydotool_sequence(&[
-            absolute_mousemove_args(params.start_x, params.start_y),
+            absolute_mousemove_args(start_x, start_y),
             vec!["click".to_string(), "0x40".to_string()],
-            absolute_mousemove_args(params.end_x, params.end_y),
+            absolute_mousemove_args(end_x, end_y),
             vec!["click".to_string(), "0x80".to_string()],
         ])
         .await;
-        Json(action_result("drag", result, received))
+        Json(with_notes(
+            action_result_with_focus("drag", result, received, focus),
+            off_screen_note,
+        ))
     }
 
     #[tool(
@@ -2025,6 +2092,43 @@ struct DragParams {
     start_y: i32,
     end_x: i32,
     end_y: i32,
+    #[serde(default)]
+    window_id: Option<u64>,
+    #[serde(default)]
+    pid: Option<u32>,
+    #[serde(default)]
+    app_id: Option<String>,
+    #[serde(default)]
+    wm_class: Option<String>,
+    #[serde(default)]
+    window_title: Option<String>,
+    /// Interpret both endpoints as relative to the target window's top-left.
+    #[serde(default)]
+    relative: Option<bool>,
+}
+
+impl DragParams {
+    fn window_target(&self) -> Option<WindowTarget> {
+        if self.window_id.is_none()
+            && self.pid.is_none()
+            && self.app_id.is_none()
+            && self.wm_class.is_none()
+            && self.window_title.is_none()
+        {
+            return None;
+        }
+        Some(WindowTarget {
+            window_id: self.window_id,
+            pid: self.pid,
+            tty: None,
+            terminal_pid: None,
+            terminal_command: None,
+            terminal_cwd: None,
+            app_id: self.app_id.clone(),
+            wm_class: self.wm_class.clone(),
+            title: self.window_title.clone(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -3404,6 +3508,99 @@ fn focused_or_requested_bounds(
         .or(focus.requested_window.bounds.as_ref())
 }
 
+fn validate_exact_drag_focus(focus: &WindowFocusResult) -> std::result::Result<(), String> {
+    if focus.exact_window_focused {
+        Ok(())
+    } else {
+        Err(
+            "Targeted drag requires exact target-window focus verification; app-level focus is not sufficient for a pointer gesture."
+                .to_string(),
+        )
+    }
+}
+
+fn apply_window_relative_drag_coordinates(
+    params: &mut DragParams,
+    focus: &WindowFocusResult,
+) -> std::result::Result<(), String> {
+    let bounds = focused_or_requested_bounds(focus).ok_or_else(|| {
+        "Relative drag coordinates require resolved target-window bounds.".to_string()
+    })?;
+    if bounds.width == 0 || bounds.height == 0 {
+        return Err(
+            "Relative drag coordinates require non-empty target-window bounds.".to_string(),
+        );
+    }
+    let (origin_x, origin_y) = bounds.x.zip(bounds.y).ok_or_else(|| {
+        "Relative drag coordinates require target-window bounds with an origin.".to_string()
+    })?;
+    let endpoints = [
+        (params.start_x, params.start_y),
+        (params.end_x, params.end_y),
+    ];
+    if endpoints
+        .iter()
+        .any(|&(x, y)| x < 0 || y < 0 || x as u32 >= bounds.width || y as u32 >= bounds.height)
+    {
+        return Err(
+            "Both relative drag endpoints must be inside target-window bounds.".to_string(),
+        );
+    }
+
+    // Compute every translated coordinate before mutating `params`, so an
+    // overflow at either endpoint cannot leave a half-translated drag.
+    let translated_start_x = origin_x
+        .checked_add(params.start_x)
+        .ok_or_else(|| "Relative drag start x coordinate overflowed.".to_string())?;
+    let translated_start_y = origin_y
+        .checked_add(params.start_y)
+        .ok_or_else(|| "Relative drag start y coordinate overflowed.".to_string())?;
+    let translated_end_x = origin_x
+        .checked_add(params.end_x)
+        .ok_or_else(|| "Relative drag end x coordinate overflowed.".to_string())?;
+    let translated_end_y = origin_y
+        .checked_add(params.end_y)
+        .ok_or_else(|| "Relative drag end y coordinate overflowed.".to_string())?;
+
+    params.start_x = translated_start_x;
+    params.start_y = translated_start_y;
+    params.end_x = translated_end_x;
+    params.end_y = translated_end_y;
+    Ok(())
+}
+
+fn validate_absolute_drag_coordinates(
+    params: &DragParams,
+    focus: &WindowFocusResult,
+) -> std::result::Result<(), String> {
+    let bounds = focused_or_requested_bounds(focus)
+        .ok_or_else(|| "Targeted drag requires resolved target-window bounds.".to_string())?;
+    if bounds.width == 0 || bounds.height == 0 {
+        return Err("Targeted drag requires non-empty target-window bounds.".to_string());
+    }
+    let (origin_x, origin_y) = bounds
+        .x
+        .zip(bounds.y)
+        .ok_or_else(|| "Targeted drag requires target-window bounds with an origin.".to_string())?;
+    let max_x = i64::from(origin_x) + i64::from(bounds.width);
+    let max_y = i64::from(origin_y) + i64::from(bounds.height);
+    let endpoints = [
+        (params.start_x, params.start_y),
+        (params.end_x, params.end_y),
+    ];
+    if endpoints.iter().any(|&(x, y)| {
+        i64::from(x) < i64::from(origin_x)
+            || i64::from(y) < i64::from(origin_y)
+            || i64::from(x) >= max_x
+            || i64::from(y) >= max_y
+    }) {
+        return Err(
+            "Both targeted drag endpoints must be inside target-window bounds.".to_string(),
+        );
+    }
+    Ok(())
+}
+
 fn apply_window_relative_path_coordinates(
     params: &mut DrawPathParams,
     focus: &WindowFocusResult,
@@ -4419,6 +4616,125 @@ mod tests {
             window_title: None,
             relative: Some(true),
         }
+    }
+
+    fn drag_params(start: (i32, i32), end: (i32, i32)) -> DragParams {
+        DragParams {
+            start_x: start.0,
+            start_y: start.1,
+            end_x: end.0,
+            end_y: end.1,
+            window_id: Some(42),
+            pid: None,
+            app_id: None,
+            wm_class: None,
+            window_title: None,
+            relative: Some(true),
+        }
+    }
+
+    #[test]
+    fn drag_window_target_preserves_every_supported_selector() {
+        let mut params = drag_params((1, 2), (3, 4));
+        params.pid = Some(4242);
+        params.app_id = Some("target-app".to_string());
+        params.wm_class = Some("TargetClass".to_string());
+        params.window_title = Some("Target Window".to_string());
+
+        let target = params.window_target().unwrap();
+
+        assert_eq!(target.window_id, Some(42));
+        assert_eq!(target.pid, Some(4242));
+        assert_eq!(target.app_id.as_deref(), Some("target-app"));
+        assert_eq!(target.wm_class.as_deref(), Some("TargetClass"));
+        assert_eq!(target.title.as_deref(), Some("Target Window"));
+    }
+
+    #[test]
+    fn drag_schema_exposes_window_targeting_and_relative_coordinates() {
+        let schema = serde_json::to_value(schemars::schema_for!(DragParams)).unwrap();
+
+        for property in [
+            "window_id",
+            "pid",
+            "app_id",
+            "wm_class",
+            "window_title",
+            "relative",
+        ] {
+            assert!(
+                schema.pointer(&format!("/properties/{property}")).is_some(),
+                "drag schema did not expose {property}"
+            );
+        }
+    }
+
+    #[test]
+    fn targeted_drag_requires_exact_window_focus() {
+        let exact = focus_result_with_bounds(Some(window_bounds(Some(100), Some(200), 800, 600)));
+        validate_exact_drag_focus(&exact).unwrap();
+
+        let mut app_level_only = exact;
+        app_level_only.exact_window_focused = false;
+        app_level_only.app_focused = true;
+        let error = validate_exact_drag_focus(&app_level_only).unwrap_err();
+
+        assert!(error.contains("exact target-window focus"));
+    }
+
+    #[test]
+    fn relative_drag_translates_both_endpoints_atomically() {
+        let focus = focus_result_with_bounds(Some(window_bounds(Some(100), Some(200), 800, 600)));
+        let mut params = drag_params((0, 0), (799, 599));
+
+        apply_window_relative_drag_coordinates(&mut params, &focus).unwrap();
+
+        assert_eq!(
+            (params.start_x, params.start_y, params.end_x, params.end_y),
+            (100, 200, 899, 799)
+        );
+    }
+
+    #[test]
+    fn relative_drag_rejects_out_of_bounds_endpoint_without_mutation() {
+        let focus = focus_result_with_bounds(Some(window_bounds(Some(100), Some(200), 800, 600)));
+        let mut params = drag_params((10, 20), (800, 30));
+
+        let error = apply_window_relative_drag_coordinates(&mut params, &focus).unwrap_err();
+
+        assert!(error.contains("Both relative drag endpoints"));
+        assert_eq!(
+            (params.start_x, params.start_y, params.end_x, params.end_y),
+            (10, 20, 800, 30)
+        );
+    }
+
+    #[test]
+    fn relative_drag_overflow_does_not_partially_translate() {
+        let focus =
+            focus_result_with_bounds(Some(window_bounds(Some(i32::MAX), Some(200), 2, 600)));
+        let mut params = drag_params((0, 0), (1, 1));
+
+        let error = apply_window_relative_drag_coordinates(&mut params, &focus).unwrap_err();
+
+        assert!(error.contains("end x coordinate overflowed"));
+        assert_eq!(
+            (params.start_x, params.start_y, params.end_x, params.end_y),
+            (0, 0, 1, 1)
+        );
+    }
+
+    #[test]
+    fn targeted_absolute_drag_requires_both_endpoints_inside_window() {
+        let focus = focus_result_with_bounds(Some(window_bounds(Some(100), Some(200), 800, 600)));
+        let mut inside = drag_params((100, 200), (899, 799));
+        inside.relative = Some(false);
+        let mut outside = drag_params((100, 200), (900, 799));
+        outside.relative = Some(false);
+
+        validate_absolute_drag_coordinates(&inside, &focus).unwrap();
+        let error = validate_absolute_drag_coordinates(&outside, &focus).unwrap_err();
+        assert!(error.contains("Both targeted drag endpoints"));
     }
 
     #[test]

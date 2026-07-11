@@ -38,7 +38,7 @@ Before calling a desktop/session live certified:
 
 1. `doctor` reports window, screenshot, input, and AT-SPI readiness accurately.
 2. A real app can be listed, exactly focused, and targeted by window id.
-3. Window-cropped screenshot coordinates round-trip to relative click and path input.
+3. Window-cropped screenshot coordinates round-trip to relative click, drag, and path input.
 4. Literal text covers ASCII, punctuation, multiline text, and non-ASCII Unicode.
 5. Move/resize either works and reports compositor-final geometry or returns an explicit unsupported result.
 6. Multi-monitor and fractional-scale coordinates are verified when the session supports them.
