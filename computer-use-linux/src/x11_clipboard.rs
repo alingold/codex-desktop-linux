@@ -4,7 +4,7 @@
 //! key event per character cannot reliably type arbitrary Unicode. This module
 //! temporarily owns the `CLIPBOARD` selection with UTF-8 text, lets a caller
 //! inject Ctrl+V through its preferred keyboard backend, and then restores the
-//! previous textual selection.
+//! previous plain-text selection.
 //!
 //! The implementation speaks the X11 selection protocol directly through the
 //! pure-Rust `x11rb`/`x11-clipboard` crates. There is no runtime dependency on
@@ -15,8 +15,10 @@
 //! Safety properties:
 //!
 //! - the previous selection is captured before input is emitted;
-//! - non-text selections and snapshots above the configured bound are refused
-//!   without changing the clipboard;
+//! - rich/mixed-format selections, non-text selections, and snapshots above
+//!   the configured bound are refused without changing the clipboard;
+//! - the final owner comparison and temporary claim are protected by a short
+//!   X server grab, closing the capture-to-claim race;
 //! - selection reads have a deadline and support ICCCM `INCR` transfers;
 //! - restoration is attempted on paste failure, timeout, panic, and future
 //!   cancellation;
@@ -28,7 +30,9 @@
 //! `X11Clipboard` keeps the restored text available by owning the X11 selection.
 //! Store one long-lived instance in the Computer Use server instead of creating
 //! an instance per call. A desktop clipboard manager may persist the selection
-//! after process exit, but this module does not require or assume one.
+//! after process exit, but this module does not require or assume one. Because
+//! the underlying owner can serve one payload target, mixed/rich clipboards are
+//! deliberately left untouched and callers can choose another input backend.
 
 use std::fmt;
 use std::future::Future;
@@ -74,7 +78,10 @@ impl Default for X11ClipboardConfig {
             restore_delay_min: Duration::from_millis(1_500),
             restore_delay_max: Duration::from_secs(5),
             assumed_transfer_bytes_per_second: 256 * 1024,
-            max_clipboard_bytes: 8 * 1024 * 1024,
+            // The owner crate does not expose transfer-completion signals. Keep
+            // the bounded heuristic conservative enough that a normal X11
+            // paste consumer can finish before restoration.
+            max_clipboard_bytes: 256 * 1024,
         }
     }
 }
@@ -435,9 +442,83 @@ struct PreparedClipboard {
 }
 
 #[derive(Clone, Debug)]
+struct CapturedClipboard {
+    original_owner: Option<Window>,
+    snapshot: ClipboardSnapshot,
+}
+
+#[derive(Clone, Debug)]
 enum ClipboardSnapshot {
     Unowned,
     Text { target: Atom, bytes: Vec<u8> },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FailedClaimDisposition {
+    RestoreSnapshot,
+    ClipboardUnchanged,
+    PreserveNewOwner,
+}
+
+fn failed_claim_disposition(
+    original_owner: Option<Window>,
+    temporary_owner: Window,
+    current_owner: Option<Window>,
+) -> FailedClaimDisposition {
+    if current_owner == Some(temporary_owner) {
+        FailedClaimDisposition::RestoreSnapshot
+    } else if current_owner == original_owner {
+        FailedClaimDisposition::ClipboardUnchanged
+    } else {
+        FailedClaimDisposition::PreserveNewOwner
+    }
+}
+
+/// A very short X server grab closes the gap between validating the captured
+/// owner and claiming the selection. The Drop path is a last-resort ungrab for
+/// every early return and panic.
+struct XServerGrab<'a> {
+    context: &'a ClipboardContext,
+    active: bool,
+}
+
+impl<'a> XServerGrab<'a> {
+    fn acquire(context: &'a ClipboardContext) -> std::result::Result<Self, String> {
+        context
+            .connection
+            .grab_server()
+            .map_err(|error| format!("failed to request X server grab: {error}"))?
+            .check()
+            .map_err(|error| format!("failed to acquire X server grab: {error}"))?;
+        Ok(Self {
+            context,
+            active: true,
+        })
+    }
+
+    fn release(&mut self) -> std::result::Result<(), String> {
+        self.context
+            .connection
+            .ungrab_server()
+            .map_err(|error| format!("failed to request X server ungrab: {error}"))?
+            .check()
+            .map_err(|error| format!("failed to release X server grab: {error}"))?;
+        self.context
+            .connection
+            .flush()
+            .map_err(|error| format!("failed to flush X server ungrab: {error}"))?;
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl Drop for XServerGrab<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = self.context.connection.ungrab_server();
+            let _ = self.context.connection.flush();
+        }
+    }
 }
 
 struct NativeClipboardEngine {
@@ -463,36 +544,73 @@ impl ClipboardEngine for NativeClipboardEngine {
             .lock()
             .map_err(|_| "X11 clipboard lock is poisoned".to_string())?;
         let selection = clipboard.getter.atoms.clipboard;
-        let snapshot = capture_snapshot(&clipboard, config)?;
+        let captured = capture_snapshot(&clipboard, config)?;
+        let temporary_owner = clipboard.setter.window;
+        let mut server_grab = XServerGrab::acquire(&clipboard.setter)?;
+        let owner_at_claim = selection_owner(&clipboard.setter, selection)?;
+        if owner_at_claim != captured.original_owner {
+            return Err(format!(
+                "X11 clipboard owner changed after capture (was {:?}, now {owner_at_claim:?}); the newer clipboard was preserved",
+                captured.original_owner
+            ));
+        }
 
         if let Err(error) =
             clipboard.store(selection, clipboard.setter.atoms.utf8_string, text.to_vec())
         {
-            let restoration = restore_snapshot(&clipboard, &snapshot);
+            let cleanup = cleanup_failed_claim(
+                &clipboard,
+                &captured.snapshot,
+                captured.original_owner,
+                temporary_owner,
+            );
             return Err(format!(
-                "failed to set temporary X11 clipboard text: {error}; restoration: {restoration:?}"
+                "failed to set temporary X11 clipboard text: {error}; {cleanup}"
             ));
         }
 
-        let temporary_owner = clipboard.setter.window;
-        match selection_owner(&clipboard.setter, selection) {
-            Ok(owner) if owner == Some(temporary_owner) => Ok(PreparedClipboard {
-                snapshot,
-                temporary_owner,
-            }),
-            Ok(owner) => {
-                let restoration = restore_snapshot(&clipboard, &snapshot);
-                Err(format!(
-                    "temporary X11 clipboard ownership was not acquired (owner {owner:?}); restoration: {restoration:?}"
-                ))
-            }
+        let owner_after_claim = match selection_owner(&clipboard.setter, selection) {
+            Ok(owner) => owner,
             Err(error) => {
-                let restoration = restore_snapshot(&clipboard, &snapshot);
-                Err(format!(
-                    "failed to verify temporary X11 clipboard ownership: {error}; restoration: {restoration:?}"
-                ))
+                let cleanup = cleanup_failed_claim(
+                    &clipboard,
+                    &captured.snapshot,
+                    captured.original_owner,
+                    temporary_owner,
+                );
+                return Err(format!(
+                    "failed to verify temporary X11 clipboard ownership: {error}; {cleanup}"
+                ));
             }
+        };
+        if owner_after_claim != Some(temporary_owner) {
+            let cleanup = cleanup_failed_claim(
+                &clipboard,
+                &captured.snapshot,
+                captured.original_owner,
+                temporary_owner,
+            );
+            return Err(format!(
+                "temporary X11 clipboard ownership was not acquired (owner {owner_after_claim:?}); {cleanup}"
+            ));
         }
+
+        if let Err(error) = server_grab.release() {
+            let cleanup = cleanup_failed_claim(
+                &clipboard,
+                &captured.snapshot,
+                captured.original_owner,
+                temporary_owner,
+            );
+            return Err(format!(
+                "temporary X11 clipboard claim could not be finalized: {error}; {cleanup}"
+            ));
+        }
+
+        Ok(PreparedClipboard {
+            snapshot: captured.snapshot,
+            temporary_owner,
+        })
     }
 
     fn restore(&self, prepared: PreparedClipboard) -> ClipboardRestoration {
@@ -519,10 +637,39 @@ impl ClipboardEngine for NativeClipboardEngine {
     }
 }
 
+fn cleanup_failed_claim(
+    clipboard: &Clipboard,
+    snapshot: &ClipboardSnapshot,
+    original_owner: Option<Window>,
+    temporary_owner: Window,
+) -> String {
+    let selection = clipboard.getter.atoms.clipboard;
+    let current_owner = match selection_owner(&clipboard.setter, selection) {
+        Ok(owner) => owner,
+        Err(error) => {
+            return format!(
+                "clipboard ownership could not be checked during cleanup ({error}); no destructive rollback was attempted"
+            )
+        }
+    };
+    match failed_claim_disposition(original_owner, temporary_owner, current_owner) {
+        FailedClaimDisposition::RestoreSnapshot => {
+            let restoration = restore_snapshot(clipboard, snapshot);
+            format!("temporary ownership was rolled back: {restoration:?}")
+        }
+        FailedClaimDisposition::ClipboardUnchanged => {
+            "the original clipboard owner remained in place".to_string()
+        }
+        FailedClaimDisposition::PreserveNewOwner => format!(
+            "clipboard owner changed to {current_owner:?}; the newer clipboard was preserved"
+        ),
+    }
+}
+
 fn capture_snapshot(
     clipboard: &Clipboard,
     config: &X11ClipboardConfig,
-) -> std::result::Result<ClipboardSnapshot, String> {
+) -> std::result::Result<CapturedClipboard, String> {
     let context = &clipboard.getter;
     let selection = context.atoms.clipboard;
 
@@ -530,7 +677,10 @@ fn capture_snapshot(
         let owner_before = selection_owner(context, selection)?;
         if owner_before.is_none() {
             if selection_owner(context, selection)?.is_none() {
-                return Ok(ClipboardSnapshot::Unowned);
+                return Ok(CapturedClipboard {
+                    original_owner: None,
+                    snapshot: ClipboardSnapshot::Unowned,
+                });
             }
             continue;
         }
@@ -546,10 +696,7 @@ fn capture_snapshot(
         )?
         .ok_or_else(|| "current X11 clipboard owner does not offer TARGETS".to_string())?;
         let advertised_targets = atoms_from_property(&targets)?;
-        let target = preferred_text_target(context, &advertised_targets).ok_or_else(|| {
-            "current X11 clipboard is not textual (UTF8_STRING and STRING are unavailable)"
-                .to_string()
-        })?;
+        let target = select_plain_text_target(context, &advertised_targets)?;
 
         let text = request_selection(
             context,
@@ -565,9 +712,12 @@ fn capture_snapshot(
         })?;
 
         if selection_owner(context, selection)? == owner_before {
-            return Ok(ClipboardSnapshot::Text {
-                target,
-                bytes: text.value,
+            return Ok(CapturedClipboard {
+                original_owner: owner_before,
+                snapshot: ClipboardSnapshot::Text {
+                    target,
+                    bytes: text.value,
+                },
             });
         }
 
@@ -579,10 +729,102 @@ fn capture_snapshot(
     Err("X11 clipboard could not be captured consistently".to_string())
 }
 
-fn preferred_text_target(context: &ClipboardContext, targets: &[Atom]) -> Option<Atom> {
-    [context.atoms.utf8_string, context.atoms.string]
+fn select_plain_text_target(
+    context: &ClipboardContext,
+    targets: &[Atom],
+) -> std::result::Result<Atom, String> {
+    let mut preferred = vec![context.atoms.utf8_string];
+    preferred.extend(intern_atoms(
+        context,
+        &[
+            "text/plain;charset=utf-8",
+            "text/plain;charset=UTF-8",
+            "text/plain",
+            "COMPOUND_TEXT",
+            "TEXT",
+        ],
+    )?);
+    preferred.push(context.atoms.string);
+
+    // These protocol/metadata targets do not carry richer clipboard content.
+    // Losing an auxiliary query after restoration does not change the semantic
+    // plain-text payload; any unknown payload target is rejected conservatively.
+    let mut allowed = preferred.clone();
+    allowed.push(context.atoms.targets);
+    allowed.extend(intern_atoms(
+        context,
+        &[
+            "TIMESTAMP",
+            "MULTIPLE",
+            "SAVE_TARGETS",
+            "DELETE",
+            "INSERT_SELECTION",
+            "INSERT_PROPERTY",
+            "LENGTH",
+            "LIST_LENGTH",
+            "CHARACTER_POSITION",
+            "NAME",
+            "CLASS",
+            "CLIENT_WINDOW",
+            "OWNER_OS",
+            "HOST_NAME",
+            "USER",
+            "SPAN",
+        ],
+    )?);
+
+    let unexpected = unsupported_clipboard_targets(targets, &allowed);
+    if !unexpected.is_empty() {
+        let labels = unexpected
+            .into_iter()
+            .map(|atom| atom_label(context, atom))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "current X11 clipboard offers rich or mixed-format target(s) ({labels}); it was left untouched because this backend can restore only semantic plain text"
+        ));
+    }
+
+    preferred
         .into_iter()
         .find(|target| targets.contains(target))
+        .ok_or_else(|| {
+            "current X11 clipboard is not plain text (no supported text target is available)"
+                .to_string()
+        })
+}
+
+fn unsupported_clipboard_targets(targets: &[Atom], allowed: &[Atom]) -> Vec<Atom> {
+    targets
+        .iter()
+        .copied()
+        .filter(|target| !allowed.contains(target))
+        .collect()
+}
+
+fn intern_atoms(
+    context: &ClipboardContext,
+    names: &[&str],
+) -> std::result::Result<Vec<Atom>, String> {
+    names
+        .iter()
+        .map(|name| {
+            context
+                .get_atom(name)
+                .map_err(|error| format!("failed to intern X11 clipboard atom {name}: {error}"))
+        })
+        .collect()
+}
+
+fn atom_label(context: &ClipboardContext, atom: Atom) -> String {
+    context
+        .connection
+        .get_atom_name(atom)
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .map(|reply| String::from_utf8_lossy(&reply.name).into_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| atom.to_string())
 }
 
 fn atoms_from_property(property: &SelectionProperty) -> std::result::Result<Vec<Atom>, String> {
@@ -925,6 +1167,40 @@ mod tests {
         }
         .restored());
         assert!(!ClipboardRestoration::Failed("no".to_string()).restored());
+    }
+
+    #[test]
+    fn failed_claim_cleanup_never_overwrites_a_new_owner() {
+        let original = Some(11);
+        let temporary = 22;
+
+        assert_eq!(
+            failed_claim_disposition(original, temporary, Some(temporary)),
+            FailedClaimDisposition::RestoreSnapshot
+        );
+        assert_eq!(
+            failed_claim_disposition(original, temporary, original),
+            FailedClaimDisposition::ClipboardUnchanged
+        );
+        assert_eq!(
+            failed_claim_disposition(original, temporary, Some(33)),
+            FailedClaimDisposition::PreserveNewOwner
+        );
+        assert_eq!(
+            failed_claim_disposition(None, temporary, Some(33)),
+            FailedClaimDisposition::PreserveNewOwner
+        );
+        assert_eq!(
+            failed_claim_disposition(None, temporary, None),
+            FailedClaimDisposition::ClipboardUnchanged
+        );
+    }
+
+    #[test]
+    fn unknown_rich_targets_are_rejected_by_plain_text_filter() {
+        let targets = [1, 2, 3, 4];
+        let allowed = [1, 2, 4];
+        assert_eq!(unsupported_clipboard_targets(&targets, &allowed), vec![3]);
     }
 
     #[tokio::test]
