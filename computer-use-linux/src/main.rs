@@ -17,6 +17,7 @@ mod server;
 mod terminal;
 mod windowing;
 mod windows;
+pub mod x11_clipboard;
 
 use anyhow::{Context, Result};
 
