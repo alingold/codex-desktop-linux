@@ -149,6 +149,87 @@ pub fn activate_window(window_id: u64) -> Result<()> {
     Ok(())
 }
 
+pub fn move_window(window_id: u64, x: i32, y: i32) -> Result<String> {
+    send_moveresize(window_id, Some((x, y)), None)?;
+    Ok(format!("Moved X11 window {window_id} to ({x}, {y})."))
+}
+
+pub fn resize_window(window_id: u64, width: i32, height: i32) -> Result<String> {
+    if width < 1 || height < 1 {
+        bail!("window width and height must both be positive");
+    }
+    unmaximize_window(window_id)?;
+    send_moveresize(window_id, None, Some((width, height)))?;
+    Ok(format!(
+        "Resized X11 window {window_id} to {width}x{height}."
+    ))
+}
+
+fn send_moveresize(
+    window_id: u64,
+    position: Option<(i32, i32)>,
+    size: Option<(i32, i32)>,
+) -> Result<()> {
+    let window = u32::try_from(window_id).context("X11 window id exceeds 32 bits")?;
+    let (connection, screen) = connect()?;
+    let root = connection.setup().roots[screen].root;
+    let message_atom = atom(&connection, "_NET_MOVERESIZE_WINDOW")?;
+    let mut flags = 0u32;
+    let mut data = [0u32; 5];
+    if let Some((x, y)) = position {
+        flags |= (1 << 8) | (1 << 9);
+        data[1] = x as u32;
+        data[2] = y as u32;
+    }
+    if let Some((width, height)) = size {
+        flags |= (1 << 10) | (1 << 11);
+        data[3] = width as u32;
+        data[4] = height as u32;
+    }
+    data[0] = flags;
+    send_root_client_message(&connection, root, window, message_atom, data)?;
+    connection.flush()?;
+    Ok(())
+}
+
+fn unmaximize_window(window_id: u64) -> Result<()> {
+    let window = u32::try_from(window_id).context("X11 window id exceeds 32 bits")?;
+    let (connection, screen) = connect()?;
+    let root = connection.setup().roots[screen].root;
+    let state_atom = atom(&connection, "_NET_WM_STATE")?;
+    let max_horz = atom(&connection, "_NET_WM_STATE_MAXIMIZED_HORZ")?;
+    let max_vert = atom(&connection, "_NET_WM_STATE_MAXIMIZED_VERT")?;
+    send_root_client_message(
+        &connection,
+        root,
+        window,
+        state_atom,
+        [0, max_horz, max_vert, 1, 0],
+    )?;
+    connection.flush()?;
+    Ok(())
+}
+
+fn send_root_client_message(
+    connection: &RustConnection,
+    root: Window,
+    window: Window,
+    message_type: Atom,
+    data: [u32; 5],
+) -> Result<()> {
+    let event = ClientMessageEvent::new(32, window, message_type, ClientMessageData::from(data));
+    connection
+        .send_event(
+            false,
+            root,
+            EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+            event,
+        )?
+        .check()
+        .context("window manager rejected EWMH client message")?;
+    Ok(())
+}
+
 fn connect() -> Result<(RustConnection, usize)> {
     x11rb::connect(None).context("failed to connect to X11 DISPLAY")
 }
