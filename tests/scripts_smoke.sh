@@ -5324,6 +5324,7 @@ EOF
     assert_contains "$REPO_DIR/tests/fixtures/create-packaged-app-fixture.sh" "resources/node-runtime/bin"
     assert_contains "$REPO_DIR/.github/workflows/ci.yml" "tests/fixtures/create-packaged-app-fixture.sh codex-app"
     assert_contains "$REPO_DIR/.github/workflows/ci.yml" "bash scripts/ci/run-node-checks.sh"
+    assert_contains "$REPO_DIR/.github/workflows/ci.yml" "shell: /bin/sh -e {0}"
     assert_contains "$REPO_DIR/.github/workflows/upstream-sync.yml" "cron: '17 14 \* \* 1'"
     assert_contains "$REPO_DIR/.github/workflows/upstream-sync.yml" "git merge --no-ff --no-edit"
     assert_contains "$REPO_DIR/.github/workflows/upstream-sync.yml" "git push --force-with-lease"
