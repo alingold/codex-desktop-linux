@@ -1123,6 +1123,17 @@ impl ComputerUseLinux {
             .map(|point| (point.x, point.y))
             .collect::<Vec<_>>();
         let delay = Duration::from_millis(u64::from(params.point_delay_ms.clamp(1, 100)));
+        let Some((button_press, button_release)) =
+            ydotool_pointer_button_masks(params.button.as_deref())
+        else {
+            return Json(ActionOutput {
+                ok: false,
+                implemented: true,
+                action: "draw_path".to_string(),
+                message: "Unsupported button. Use left, right, or middle.".to_string(),
+                received,
+            });
+        };
         let abs_button = crate::abs_pointer::PointerButton::from_name(params.button.as_deref());
         let portal_button = PointerButton::from_name(params.button.as_deref());
 
@@ -1190,11 +1201,11 @@ impl ComputerUseLinux {
             params.points[0].x,
             params.points[0].y,
         ));
-        sequence.push(vec!["click".to_string(), "0x40".to_string()]);
+        sequence.push(vec!["click".to_string(), button_press.to_string()]);
         for point in &params.points[1..] {
             sequence.push(absolute_mousemove_args(point.x, point.y));
         }
-        sequence.push(vec!["click".to_string(), "0x80".to_string()]);
+        sequence.push(vec!["click".to_string(), button_release.to_string()]);
         let result = run_ydotool_sequence(&sequence).await;
         Json(action_result("draw_path", result, received))
     }
@@ -3400,6 +3411,20 @@ fn wheel_mousemove_args(dx: i32, dy: i32) -> Vec<String> {
     ]
 }
 
+fn ydotool_pointer_button_masks(button: Option<&str>) -> Option<(&'static str, &'static str)> {
+    match button
+        .unwrap_or("left")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "left" => Some(("0x40", "0x80")),
+        "right" => Some(("0x10", "0x20")),
+        "middle" => Some(("0x04", "0x08")),
+        _ => None,
+    }
+}
+
 async fn run_ydotool_sequence(
     commands: &[Vec<String>],
 ) -> std::result::Result<Vec<Output>, String> {
@@ -4634,6 +4659,20 @@ mod tests {
                 "-3".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn draw_path_ydotool_masks_match_requested_button() {
+        assert_eq!(ydotool_pointer_button_masks(None), Some(("0x40", "0x80")));
+        assert_eq!(
+            ydotool_pointer_button_masks(Some("RIGHT")),
+            Some(("0x10", "0x20"))
+        );
+        assert_eq!(
+            ydotool_pointer_button_masks(Some("middle")),
+            Some(("0x04", "0x08"))
+        );
+        assert_eq!(ydotool_pointer_button_masks(Some("side")), None);
     }
 
     #[test]
