@@ -21,6 +21,7 @@ use crate::windows::{
     window_permission_hint, WindowFocusResult, WindowInfo, WindowTarget,
     GNOME_SHELL_INTROSPECT_BACKEND,
 };
+use crate::x11_clipboard::{ClipboardRestoration, X11Clipboard, X11ClipboardPasteReport};
 use anyhow::Result;
 use rmcp::{
     handler::server::wrapper::{Json, Parameters},
@@ -51,6 +52,7 @@ const KDE_CLIPBOARD_DBUS_TIMEOUT: Duration = Duration::from_secs(3);
 const KDE_KLIPPER_SERVICE: &str = "org.kde.klipper";
 const KDE_KLIPPER_PATH: &str = "/klipper";
 const KDE_KLIPPER_INTERFACE: &str = "org.kde.klipper.klipper";
+const XDOTOOL_PASTE_ARGS: [&str; 3] = ["key", "--clearmodifiers", "ctrl+v"];
 
 #[derive(Clone, Default)]
 pub struct ComputerUseLinux {
@@ -61,6 +63,9 @@ pub struct ComputerUseLinux {
     abs_pointer: Arc<Mutex<Option<crate::abs_pointer::AbsPointer>>>,
     portal_keyboard_init_lock: Arc<tokio::sync::Mutex<()>>,
     kde_clipboard_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Lazily connected, long-lived X11 clipboard owner used for transactional
+    /// Unicode paste and restoration on native X11 sessions.
+    x11_clipboard: Arc<tokio::sync::Mutex<Option<X11Clipboard>>>,
     /// Cached logical desktop size (union of monitors) from the most recent
     /// full-frame capture; used for off-screen window/coordinate warnings.
     desktop_size: Arc<Mutex<Option<(u32, u32)>>>,
@@ -1386,6 +1391,36 @@ impl ComputerUseLinux {
                 Err(_) => {}
             }
         }
+        if self.should_prefer_x11_clipboard_text_backend() {
+            if let Ok(clipboard) = self.ensure_x11_clipboard().await {
+                match clipboard
+                    .paste_text(&params.text, paste_ctrl_v_with_xdotool)
+                    .await
+                {
+                    Ok(report) => {
+                        let notes = self.input_landing_notes(focus.as_ref(), true).await;
+                        return Json(with_notes(
+                            successful_action_with_focus(
+                                "type_text",
+                                &x11_clipboard_success_message(&report),
+                                received,
+                                focus,
+                            ),
+                            notes,
+                        ));
+                    }
+                    Err(error) if error.can_fallback_to_keyboard() => {}
+                    Err(error) => {
+                        return Json(action_result_with_focus(
+                            "type_text",
+                            Err(error.to_string()),
+                            received,
+                            focus,
+                        ));
+                    }
+                }
+            }
+        }
         if self.should_prefer_portal_keyboard_backend() {
             if let Ok(keysyms) = keysyms_for_text(&params.text) {
                 match self.ensure_portal_keyboard_session().await {
@@ -2147,6 +2182,14 @@ impl ComputerUseLinux {
             .is_some_and(|value| value.eq_ignore_ascii_case("wayland"))
     }
 
+    fn is_x11_session(&self) -> bool {
+        crate::diagnostics::hydrate_session_bus_env();
+        env::var("XDG_SESSION_TYPE")
+            .ok()
+            .is_some_and(|value| value.eq_ignore_ascii_case("x11"))
+            || (env::var_os("DISPLAY").is_some() && env::var_os("WAYLAND_DISPLAY").is_none())
+    }
+
     // The Wayland remote-desktop portal is now a *fallback* for input: when a
     // working `ydotoold` socket is present we prefer ydotool, because it injects
     // input without a permission prompt. GNOME refuses to persist remote-desktop
@@ -2193,6 +2236,31 @@ impl ComputerUseLinux {
             "COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD",
             "CODEX_COMPUTER_USE_FORCE_YDOTOOL_KEYBOARD",
         ]) && self.is_kde_wayland_session()
+    }
+
+    fn should_prefer_x11_clipboard_text_backend(&self) -> bool {
+        let forced_ydotool = env_flag_enabled_any(&[
+            "COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD",
+            "CODEX_COMPUTER_USE_FORCE_YDOTOOL_KEYBOARD",
+        ]);
+        x11_clipboard_backend_eligible(
+            forced_ydotool,
+            self.is_x11_session(),
+            command_succeeds("xdotool", &["--version"]),
+        )
+    }
+
+    async fn ensure_x11_clipboard(&self) -> std::result::Result<X11Clipboard, String> {
+        let mut cached = self.x11_clipboard.lock().await;
+        if let Some(clipboard) = cached.as_ref() {
+            return Ok(clipboard.clone());
+        }
+        let clipboard = tokio::task::spawn_blocking(X11Clipboard::connect)
+            .await
+            .map_err(|error| format!("X11 clipboard initialization task failed: {error}"))?
+            .map_err(|error| format!("X11 clipboard initialization failed: {error:#}"))?;
+        *cached = Some(clipboard.clone());
+        Ok(clipboard)
     }
 
     fn is_kde_wayland_session(&self) -> bool {
@@ -3510,7 +3578,7 @@ fn describe_focused_element(element: &FocusedElementSummary, expects_editable: b
         format!("Focused element: {}{name} (editable).", element.role)
     } else if expects_editable {
         format!(
-            "WARNING: focused element is {}{name}, which is not editable — the typed text likely went nowhere. Click the intended input first or use set_value.",
+            "WARNING: focused element is {}{name}, which AT-SPI does not report as editable. The window received the input, but field-level focus could not be confirmed; verify visually, click the intended input, or use set_value.",
             element.role
         )
     } else {
@@ -3637,6 +3705,61 @@ async fn run_ydotool(args: &[String]) -> std::result::Result<Output, String> {
         },
         Err(error) => Err(format!("failed to run ydotool: {error}")),
     }
+}
+
+async fn paste_ctrl_v_with_xdotool() -> std::result::Result<(), String> {
+    let mut command = TokioCommand::new("xdotool");
+    command
+        .args(XDOTOOL_PASTE_ARGS)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let output = command
+        .output()
+        .await
+        .map_err(|error| format!("failed to run xdotool: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(command_output_error("xdotool", output))
+    }
+}
+
+fn x11_clipboard_backend_eligible(
+    forced_ydotool: bool,
+    is_x11_session: bool,
+    xdotool_available: bool,
+) -> bool {
+    !forced_ydotool && is_x11_session && xdotool_available
+}
+
+fn command_succeeds(command: &str, args: &[&str]) -> bool {
+    Command::new(command)
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn x11_clipboard_success_message(report: &X11ClipboardPasteReport) -> String {
+    let restoration = match &report.restoration {
+        ClipboardRestoration::RestoredText => "Previous text clipboard contents were restored.",
+        ClipboardRestoration::RestoredUnowned => "The previously unowned clipboard was restored.",
+        ClipboardRestoration::SkippedClipboardChanged { .. } => {
+            "The clipboard changed during paste, so the newer contents were preserved."
+        }
+        ClipboardRestoration::Failed(error) => {
+            return format!(
+                "Pasted {} UTF-8 bytes through native X11 clipboard integration. Warning: previous clipboard restoration failed: {error}",
+                report.bytes
+            );
+        }
+    };
+    format!(
+        "Pasted {} UTF-8 bytes through native X11 clipboard integration. {restoration}",
+        report.bytes
+    )
 }
 
 async fn run_ydotool_type_text(text: &str) -> std::result::Result<Output, String> {
@@ -5254,7 +5377,22 @@ mod tests {
         };
         let described = describe_focused_element(&element, true);
         assert!(described.contains("WARNING"));
-        assert!(described.contains("not editable"));
+        assert!(described.contains("does not report as editable"));
+        assert!(described.contains("field-level focus could not be confirmed"));
+        assert!(!described.contains("likely went nowhere"));
+    }
+
+    #[test]
+    fn x11_clipboard_backend_requires_x11_xdotool_and_no_forced_fallback() {
+        assert!(x11_clipboard_backend_eligible(false, true, true));
+        assert!(!x11_clipboard_backend_eligible(true, true, true));
+        assert!(!x11_clipboard_backend_eligible(false, false, true));
+        assert!(!x11_clipboard_backend_eligible(false, true, false));
+    }
+
+    #[test]
+    fn x11_clipboard_paste_clears_stale_modifiers() {
+        assert_eq!(XDOTOOL_PASTE_ARGS, ["key", "--clearmodifiers", "ctrl+v"]);
     }
 
     #[test]
