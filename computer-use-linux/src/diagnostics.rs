@@ -153,6 +153,18 @@ pub struct InputActionReadiness {
     pub remediation: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InputBackendOverride {
+    Ydotool,
+    Portal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct InputBackendOverrides {
+    pub pointer: Option<InputBackendOverride>,
+    pub keyboard: Option<InputBackendOverride>,
+}
+
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct SetupReport {
     pub before: DoctorReport,
@@ -385,8 +397,25 @@ fn capability_map(
         isolation.push("headless_gnome".to_string());
     }
 
+    let overrides = input_backend_overrides();
+    let preferred_input = match overrides.pointer {
+        Some(InputBackendOverride::Ydotool) => input_backends
+            .iter()
+            .find(|backend| backend.as_str() == "ydotool")
+            .cloned(),
+        Some(InputBackendOverride::Portal) => input_backends
+            .iter()
+            .find(|backend| backend.as_str() == "portal")
+            .or_else(|| {
+                input_backends
+                    .iter()
+                    .find(|backend| backend.as_str() == "ydotool")
+            })
+            .cloned(),
+        None => input_backends.first().cloned(),
+    };
     let preferred = PreferredBackends {
-        input: input_backends.first().cloned(),
+        input: preferred_input,
         screenshot: screenshot_backends.first().cloned(),
         window_control: window_backends.first().cloned(),
     };
@@ -859,6 +888,15 @@ fn input_action_readiness(
     portals: &PortalReport,
     input: &InputReport,
 ) -> BTreeMap<String, InputActionReadiness> {
+    input_action_readiness_with_overrides(platform, portals, input, input_backend_overrides())
+}
+
+fn input_action_readiness_with_overrides(
+    platform: &PlatformReport,
+    portals: &PortalReport,
+    input: &InputReport,
+    overrides: InputBackendOverrides,
+) -> BTreeMap<String, InputActionReadiness> {
     let x11_xdotool = is_x11_platform(platform) && input.xdotool.ok;
     let x11 = is_x11_platform(platform);
     let kde_wayland = is_kde_wayland_platform(platform);
@@ -866,7 +904,13 @@ fn input_action_readiness(
     let ydotool = complete_ydotool_available(input);
 
     let pointer_backend = || {
-        if x11 {
+        if overrides.pointer == Some(InputBackendOverride::Ydotool) {
+            preferred_input_backend(&[(ydotool, "ydotool")])
+        } else if overrides.pointer == Some(InputBackendOverride::Portal) {
+            // Forced portal bypasses native pointer backends, but runtime keeps
+            // ydotool as a last-resort fallback if portal setup is unavailable.
+            preferred_input_backend(&[(portal, "portal"), (ydotool, "ydotool")])
+        } else if x11 {
             preferred_input_backend(&[
                 (input.uinput.ok, "abs_pointer"),
                 (x11_xdotool, "xdotool_x11"),
@@ -884,7 +928,11 @@ fn input_action_readiness(
     // The absolute pointer deliberately does not implement wheel input, while
     // the other pointer backends do.
     let pointer_without_absolute = || {
-        if x11 {
+        if overrides.pointer == Some(InputBackendOverride::Ydotool) {
+            preferred_input_backend(&[(ydotool, "ydotool")])
+        } else if overrides.pointer == Some(InputBackendOverride::Portal) {
+            preferred_input_backend(&[(portal, "portal"), (ydotool, "ydotool")])
+        } else if x11 {
             preferred_input_backend(&[
                 (x11_xdotool, "xdotool_x11"),
                 (portal, "portal"),
@@ -895,14 +943,18 @@ fn input_action_readiness(
         }
     };
     let keyboard_backend = || {
-        if x11 {
+        if overrides.keyboard == Some(InputBackendOverride::Ydotool) {
+            preferred_input_backend(&[(ydotool, "ydotool")])
+        } else if overrides.keyboard == Some(InputBackendOverride::Portal) {
+            preferred_input_backend(&[(portal, "portal")])
+        } else if x11 {
             preferred_input_backend(&[(x11_xdotool, "xdotool_x11"), (ydotool, "ydotool")])
         } else {
             preferred_input_backend(&[(ydotool, "ydotool"), (portal, "portal")])
         }
     };
     let type_text_backend = || {
-        if kde_wayland {
+        if overrides.keyboard.is_none() && kde_wayland {
             preferred_input_backend(&[(ydotool, "ydotool")])
         } else {
             keyboard_backend()
@@ -918,13 +970,37 @@ fn input_action_readiness(
     );
     actions.insert("press_key".to_string(), input_action(keyboard_backend()));
     let mut type_text = input_action(type_text_backend());
-    if kde_wayland && !type_text.ready {
+    if overrides.keyboard.is_none() && kde_wayland && !type_text.ready {
         type_text.remediation = Some(
             "Install ydotool and start ydotoold with an accessible socket. KDE clipboard paste may work at runtime, but readiness does not claim it until Klipper availability can be verified."
                 .to_string(),
         );
     }
     actions.insert("type_text".to_string(), type_text);
+    for (names, backend_override) in [
+        (
+            &["click", "scroll", "drag", "draw_path"][..],
+            overrides.pointer,
+        ),
+        (&["press_key", "type_text"][..], overrides.keyboard),
+    ] {
+        let Some(backend_override) = backend_override else {
+            continue;
+        };
+        let backend = match backend_override {
+            InputBackendOverride::Ydotool => "ydotool",
+            InputBackendOverride::Portal => "portal",
+        };
+        for name in names {
+            if let Some(action) = actions.get_mut(*name) {
+                if !action.ready {
+                    action.remediation = Some(format!(
+                        "The {backend} FORCE override is enabled, but that backend is not ready. Fix or remove the override, then rerun doctor --summary."
+                    ));
+                }
+            }
+        }
+    }
     actions
 }
 
@@ -946,7 +1022,53 @@ fn input_action(backend: Option<&str>) -> InputActionReadiness {
 }
 
 fn complete_ydotool_available(input: &InputReport) -> bool {
-    input.ydotool.ok && input.ydotoold.ok && input.ydotool_socket.ok
+    complete_ydotool_policy(input.ydotool.ok, input.ydotoold.ok, input.ydotool_socket.ok)
+}
+
+pub(crate) fn complete_ydotool_policy(
+    executable_available: bool,
+    daemon_running: bool,
+    socket_connectable: bool,
+) -> bool {
+    executable_available && daemon_running && socket_connectable
+}
+
+pub(crate) fn input_backend_overrides() -> InputBackendOverrides {
+    input_backend_overrides_from(|key| env::var(key).ok().as_deref() == Some("1"))
+}
+
+fn input_backend_overrides_from(enabled: impl Fn(&str) -> bool) -> InputBackendOverrides {
+    let selected = |ydotool_keys: &[&str], portal_keys: &[&str]| {
+        if ydotool_keys.iter().any(|key| enabled(key)) {
+            Some(InputBackendOverride::Ydotool)
+        } else if portal_keys.iter().any(|key| enabled(key)) {
+            Some(InputBackendOverride::Portal)
+        } else {
+            None
+        }
+    };
+    InputBackendOverrides {
+        pointer: selected(
+            &[
+                "COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER",
+                "CODEX_COMPUTER_USE_FORCE_YDOTOOL_POINTER",
+            ],
+            &[
+                "COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER",
+                "CODEX_COMPUTER_USE_FORCE_PORTAL_POINTER",
+            ],
+        ),
+        keyboard: selected(
+            &[
+                "COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD",
+                "CODEX_COMPUTER_USE_FORCE_YDOTOOL_KEYBOARD",
+            ],
+            &[
+                "COMPUTER_USE_LINUX_FORCE_PORTAL_KEYBOARD",
+                "CODEX_COMPUTER_USE_FORCE_PORTAL_KEYBOARD",
+            ],
+        ),
+    }
 }
 
 fn is_x11_platform(platform: &PlatformReport) -> bool {
@@ -1752,6 +1874,68 @@ mod tests {
         assert_eq!(actions["press_key"].backend.as_deref(), Some("portal"));
         assert!(!actions["type_text"].ready);
         assert!(actions["type_text"].backend.is_none());
+    }
+
+    #[test]
+    fn force_overrides_replace_default_action_backends() {
+        let mut platform = platform_report();
+        platform.xdg_session_type = Some("x11".to_string());
+        platform.wayland_display = None;
+        let mut input = input_report_parts(
+            Check::fail("ydotool missing"),
+            Check::fail("ydotoold missing"),
+            Check::fail("socket missing"),
+            Check::ok("uinput"),
+        );
+        input.xdotool = Check::ok("xdotool connected");
+        let portals = portal_report(Check::ok("RemoteDesktop portal"));
+
+        let forced_ydotool = input_action_readiness_with_overrides(
+            &platform,
+            &portals,
+            &input,
+            InputBackendOverrides {
+                pointer: Some(InputBackendOverride::Ydotool),
+                keyboard: Some(InputBackendOverride::Ydotool),
+            },
+        );
+        assert!(forced_ydotool.values().all(|action| !action.ready));
+
+        let forced_portal = input_action_readiness_with_overrides(
+            &platform,
+            &portals,
+            &input,
+            InputBackendOverrides {
+                pointer: Some(InputBackendOverride::Portal),
+                keyboard: Some(InputBackendOverride::Portal),
+            },
+        );
+        assert!(forced_portal
+            .values()
+            .all(|action| action.backend.as_deref() == Some("portal")));
+    }
+
+    #[test]
+    fn force_override_parser_uses_aliases_and_ydotool_precedence() {
+        let overrides = input_backend_overrides_from(|key| {
+            matches!(
+                key,
+                "CODEX_COMPUTER_USE_FORCE_PORTAL_POINTER"
+                    | "CODEX_COMPUTER_USE_FORCE_YDOTOOL_KEYBOARD"
+                    | "CODEX_COMPUTER_USE_FORCE_PORTAL_KEYBOARD"
+            )
+        });
+
+        assert_eq!(overrides.pointer, Some(InputBackendOverride::Portal));
+        assert_eq!(overrides.keyboard, Some(InputBackendOverride::Ydotool));
+    }
+
+    #[test]
+    fn complete_ydotool_policy_requires_all_three_checks() {
+        assert!(complete_ydotool_policy(true, true, true));
+        assert!(!complete_ydotool_policy(false, true, true));
+        assert!(!complete_ydotool_policy(true, false, true));
+        assert!(!complete_ydotool_policy(true, true, false));
     }
 
     #[test]

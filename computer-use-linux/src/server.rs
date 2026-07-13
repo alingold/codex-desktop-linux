@@ -3,7 +3,10 @@ use crate::atspi_tree::{
     set_element_value, snapshot_tree, AccessibilityAction, AccessibilityNode, AccessibleAppSummary,
     Bounds, FocusedElementSummary, ValueSetInvocation,
 };
-use crate::diagnostics::{doctor_report, setup_accessibility_report, DoctorReport, SetupReport};
+use crate::diagnostics::{
+    complete_ydotool_policy, doctor_report, input_backend_overrides, setup_accessibility_report,
+    DoctorReport, InputBackendOverride, SetupReport,
+};
 use crate::gnome_extension::{setup_window_targeting_report, WindowTargetingSetupReport};
 use crate::remote_desktop::{
     click as portal_click, drag as portal_drag, draw_path as portal_draw_path, keysyms_for_text,
@@ -49,6 +52,7 @@ use zbus::{Connection as ZbusConnection, Proxy as ZbusProxy};
 
 const YDOTOOL_TIMEOUT: Duration = Duration::from_secs(10);
 const XDOTOOL_TIMEOUT: Duration = Duration::from_secs(5);
+const XDOTOOL_SCROLL_DELAY_MS: u64 = 10;
 const YDOTOOL_TYPE_CHARS_PER_SECOND: u64 = 20;
 const KDE_CLIPBOARD_DBUS_TIMEOUT: Duration = Duration::from_secs(3);
 const KDE_KLIPPER_SERVICE: &str = "org.kde.klipper";
@@ -681,7 +685,7 @@ impl ComputerUseLinux {
                     params.button.as_deref(),
                     params.click_count.unwrap_or(1).clamp(1, 10),
                 ),
-                None,
+                Some(xdotool_click_button(params.button.as_deref())),
                 XDOTOOL_TIMEOUT,
             )
             .await
@@ -697,6 +701,12 @@ impl ComputerUseLinux {
                         },
                         off_screen_note.clone(),
                     ))
+                }
+                Err(error) if !error.safe_to_fallback() => {
+                    return Json(with_notes(
+                        uncertain_pointer_delivery("click", "xdotool", &error.message, received),
+                        off_screen_note,
+                    ));
                 }
                 Err(error) => backend_errors.push(format!("xdotool: {error}")),
             }
@@ -727,7 +737,15 @@ impl ComputerUseLinux {
                     }
                     Err(error) => {
                         self.clear_portal_pointer_session();
-                        backend_errors.push(format!("portal input: {error:#}"));
+                        return Json(with_notes(
+                            uncertain_pointer_delivery(
+                                "click",
+                                "remote desktop portal",
+                                &format!("{error:#}"),
+                                received,
+                            ),
+                            off_screen_note,
+                        ));
                     }
                 },
                 Ok(None) => {}
@@ -956,8 +974,8 @@ impl ComputerUseLinux {
         if self.should_use_x11_xdotool_pointer_backend() {
             match run_xdotool_pointer(
                 &xdotool_scroll_args(target_point, &params.direction, units),
-                None,
-                XDOTOOL_TIMEOUT,
+                Some(xdotool_scroll_button(&params.direction)),
+                xdotool_scroll_timeout(units),
             )
             .await
             {
@@ -972,6 +990,12 @@ impl ComputerUseLinux {
                         },
                         off_screen_note.clone(),
                     ))
+                }
+                Err(error) if !error.safe_to_fallback() => {
+                    return Json(with_notes(
+                        uncertain_pointer_delivery("scroll", "xdotool", &error.message, received),
+                        off_screen_note,
+                    ));
                 }
                 Err(error) => backend_errors.push(format!("xdotool: {error}")),
             }
@@ -995,7 +1019,15 @@ impl ComputerUseLinux {
                         }
                         Err(error) => {
                             self.clear_portal_pointer_session();
-                            backend_errors.push(format!("portal input: {error:#}"));
+                            return Json(with_notes(
+                                uncertain_pointer_delivery(
+                                    "scroll",
+                                    "remote desktop portal",
+                                    &format!("{error:#}"),
+                                    received,
+                                ),
+                                off_screen_note,
+                            ));
                         }
                     }
                 }
@@ -1177,6 +1209,15 @@ impl ComputerUseLinux {
                         off_screen_note.clone(),
                     ))
                 }
+                Err(error) if !error.safe_to_fallback() => {
+                    return Json(with_notes(
+                        with_focus_context(
+                            uncertain_pointer_delivery("drag", "xdotool", &error.message, received),
+                            focus,
+                        ),
+                        off_screen_note,
+                    ));
+                }
                 Err(error) => backend_errors.push(format!("xdotool: {error}")),
             }
         }
@@ -1197,7 +1238,18 @@ impl ComputerUseLinux {
                         }
                         Err(error) => {
                             self.clear_portal_pointer_session();
-                            backend_errors.push(format!("portal input: {error:#}"));
+                            return Json(with_notes(
+                                with_focus_context(
+                                    uncertain_pointer_delivery(
+                                        "drag",
+                                        "remote desktop portal",
+                                        &format!("{error:#}"),
+                                        received,
+                                    ),
+                                    focus,
+                                ),
+                                off_screen_note,
+                            ));
                         }
                     }
                 }
@@ -1205,13 +1257,11 @@ impl ComputerUseLinux {
                 Err(error) => backend_errors.push(format!("portal setup: {error:#}")),
             }
         }
-        let result = run_ydotool_sequence(&[
-            absolute_mousemove_args(start_x, start_y),
-            vec!["click".to_string(), "0x40".to_string()],
-            absolute_mousemove_args(end_x, end_y),
-            vec!["click".to_string(), "0x80".to_string()],
-        ])
-        .await;
+        let before_press = [absolute_mousemove_args(start_x, start_y)];
+        let press = ["click".to_string(), "0x40".to_string()];
+        let while_held = [absolute_mousemove_args(end_x, end_y)];
+        let release = ["click".to_string(), "0x80".to_string()];
+        let result = run_ydotool_held_sequence(&before_press, &press, &while_held, &release).await;
         let output = match result {
             Ok(outputs) => action_result_with_focus("drag", Ok(outputs), received, focus),
             Err(error) => {
@@ -1385,6 +1435,17 @@ impl ComputerUseLinux {
                         off_screen_note.clone(),
                     ))
                 }
+                Err(error) if !error.safe_to_fallback() => {
+                    return Json(with_notes(
+                        uncertain_pointer_delivery(
+                            "draw_path",
+                            "xdotool",
+                            &error.message,
+                            received,
+                        ),
+                        off_screen_note,
+                    ));
+                }
                 Err(error) => backend_errors.push(format!("xdotool: {error}")),
             }
         }
@@ -1409,7 +1470,15 @@ impl ComputerUseLinux {
                         }
                         Err(error) => {
                             self.clear_portal_pointer_session();
-                            backend_errors.push(format!("portal input: {error:#}"));
+                            return Json(with_notes(
+                                uncertain_pointer_delivery(
+                                    "draw_path",
+                                    "remote desktop portal",
+                                    &format!("{error:#}"),
+                                    received,
+                                ),
+                                off_screen_note,
+                            ));
                         }
                     }
                 }
@@ -1418,14 +1487,14 @@ impl ComputerUseLinux {
             }
         }
 
-        let mut sequence = Vec::with_capacity(params.points.len() + 2);
-        sequence.push(absolute_mousemove_args(points[0].0, points[0].1));
-        sequence.push(vec!["click".to_string(), button_press.to_string()]);
+        let before_press = [absolute_mousemove_args(points[0].0, points[0].1)];
+        let press = ["click".to_string(), button_press.to_string()];
+        let mut while_held = Vec::with_capacity(params.points.len() - 1);
         for &(x, y) in &points[1..] {
-            sequence.push(absolute_mousemove_args(x, y));
+            while_held.push(absolute_mousemove_args(x, y));
         }
-        sequence.push(vec!["click".to_string(), button_release.to_string()]);
-        let result = run_ydotool_sequence(&sequence).await;
+        let release = ["click".to_string(), button_release.to_string()];
+        let result = run_ydotool_held_sequence(&before_press, &press, &while_held, &release).await;
         let output = match result {
             Ok(outputs) => action_result("draw_path", Ok(outputs), received),
             Err(error) => {
@@ -1534,7 +1603,10 @@ impl ComputerUseLinux {
                 ));
             }
         }
-        if self.is_x11_session() && command_succeeds("xdotool", &["--version"]) {
+        if input_backend_overrides().keyboard.is_none()
+            && self.is_x11_session()
+            && command_succeeds("xdotool", &["--version"])
+        {
             let xdotool_key = xdotool_key_chord(&params.key).expect("validated key chord");
             match run_xdotool_key(&xdotool_key).await {
                 Ok(()) => {
@@ -2565,87 +2637,51 @@ impl ComputerUseLinux {
     // fallback if portal setup fails. The `CODEX_COMPUTER_USE_*` aliases let
     // downstream bundles share this source without local string patches.
     fn should_attempt_portal_pointer_backend(&self) -> bool {
-        if env_flag_enabled_any(&[
-            "COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER",
-            "CODEX_COMPUTER_USE_FORCE_YDOTOOL_POINTER",
-        ]) {
-            return false;
+        match input_backend_overrides().pointer {
+            Some(InputBackendOverride::Ydotool) => return false,
+            Some(InputBackendOverride::Portal) => return true,
+            None => {}
         }
-        if env_flag_enabled_any(&[
-            "COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER",
-            "CODEX_COMPUTER_USE_FORCE_PORTAL_POINTER",
-        ]) {
-            return true;
-        }
-        self.is_x11_session() || self.is_wayland_session() && ydotool_socket().is_none()
+        self.is_x11_session() || self.is_wayland_session() && !complete_ydotool_runtime_available()
     }
 
     fn should_use_x11_xdotool_pointer_backend(&self) -> bool {
-        self.is_x11_session()
-            && !env_flag_enabled_any(&[
-                "COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER",
-                "CODEX_COMPUTER_USE_FORCE_YDOTOOL_POINTER",
-                "COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER",
-                "CODEX_COMPUTER_USE_FORCE_PORTAL_POINTER",
-            ])
+        self.is_x11_session() && input_backend_overrides().pointer.is_none()
     }
 
     fn should_use_abs_pointer_backend(&self) -> bool {
-        !env_flag_enabled_any(&[
-            "COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER",
-            "CODEX_COMPUTER_USE_FORCE_YDOTOOL_POINTER",
-            "COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER",
-            "CODEX_COMPUTER_USE_FORCE_PORTAL_POINTER",
-        ])
+        input_backend_overrides().pointer.is_none()
     }
 
     fn should_prefer_portal_keyboard_backend(&self) -> bool {
-        if env_flag_enabled_any(&[
-            "COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD",
-            "CODEX_COMPUTER_USE_FORCE_YDOTOOL_KEYBOARD",
-        ]) {
-            return false;
+        match input_backend_overrides().keyboard {
+            Some(InputBackendOverride::Ydotool) => return false,
+            Some(InputBackendOverride::Portal) => return true,
+            None => {}
         }
-        if env_flag_enabled_any(&[
-            "COMPUTER_USE_LINUX_FORCE_PORTAL_KEYBOARD",
-            "CODEX_COMPUTER_USE_FORCE_PORTAL_KEYBOARD",
-        ]) {
-            return self.is_wayland_session() && !self.is_kde_wayland_session();
-        }
-        self.is_wayland_session() && !self.is_kde_wayland_session() && ydotool_socket().is_none()
+        self.is_wayland_session()
+            && !self.is_kde_wayland_session()
+            && !complete_ydotool_runtime_available()
     }
 
     fn should_prefer_portal_key_chord_backend(&self) -> bool {
-        if env_flag_enabled_any(&[
-            "COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD",
-            "CODEX_COMPUTER_USE_FORCE_YDOTOOL_KEYBOARD",
-        ]) {
-            return false;
+        match input_backend_overrides().keyboard {
+            Some(InputBackendOverride::Ydotool) => return false,
+            Some(InputBackendOverride::Portal) => return true,
+            None => {}
         }
-        if env_flag_enabled_any(&[
-            "COMPUTER_USE_LINUX_FORCE_PORTAL_KEYBOARD",
-            "CODEX_COMPUTER_USE_FORCE_PORTAL_KEYBOARD",
-        ]) {
-            return self.is_wayland_session();
-        }
-        self.is_wayland_session() && ydotool_socket().is_none()
+        self.is_wayland_session() && !complete_ydotool_runtime_available()
     }
 
     fn should_prefer_kde_clipboard_text_backend(&self) -> bool {
-        !env_flag_enabled_any(&[
-            "COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD",
-            "CODEX_COMPUTER_USE_FORCE_YDOTOOL_KEYBOARD",
-        ]) && self.is_kde_wayland_session()
-            && ydotool_socket().is_none()
+        input_backend_overrides().keyboard.is_none()
+            && self.is_kde_wayland_session()
+            && !complete_ydotool_runtime_available()
     }
 
     fn should_prefer_x11_clipboard_text_backend(&self) -> bool {
-        let forced_ydotool = env_flag_enabled_any(&[
-            "COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD",
-            "CODEX_COMPUTER_USE_FORCE_YDOTOOL_KEYBOARD",
-        ]);
         x11_clipboard_backend_eligible(
-            forced_ydotool,
+            input_backend_overrides().keyboard.is_some(),
             self.is_x11_session(),
             command_succeeds("xdotool", &["--version"]),
         )
@@ -2712,10 +2748,10 @@ impl ComputerUseLinux {
     }
 
     async fn ensure_portal_keyboard_session(&self) -> Result<Option<PortalKeyboardSession>> {
-        if env_flag_enabled_any(&[
-            "COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD",
-            "CODEX_COMPUTER_USE_FORCE_YDOTOOL_KEYBOARD",
-        ]) || !self.is_wayland_session()
+        let backend_override = input_backend_overrides().keyboard;
+        if backend_override == Some(InputBackendOverride::Ydotool)
+            || (!self.is_wayland_session()
+                && backend_override != Some(InputBackendOverride::Portal))
         {
             return Ok(None);
         }
@@ -4067,6 +4103,23 @@ fn exhausted_pointer_action(
     }
 }
 
+fn uncertain_pointer_delivery(
+    action: &str,
+    backend: &str,
+    error: &str,
+    received: Option<serde_json::Value>,
+) -> ActionOutput {
+    ActionOutput {
+        ok: false,
+        implemented: true,
+        action: action.to_string(),
+        message: format!(
+            "{backend} started the pointer action but did not complete cleanly: {error}. No fallback backend was attempted because that could duplicate partially delivered input."
+        ),
+        received,
+    }
+}
+
 fn action_result_with_focus(
     action: &str,
     result: std::result::Result<Vec<Output>, String>,
@@ -4234,18 +4287,7 @@ fn xdotool_button(button: Option<&str>) -> Option<&'static str> {
 }
 
 fn xdotool_click_args(x: i32, y: i32, button: Option<&str>, click_count: u32) -> Vec<String> {
-    let button = match button
-        .unwrap_or("left")
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "right" => "3",
-        "middle" => "2",
-        "side" | "back" => "8",
-        "extra" | "forward" => "9",
-        _ => "1",
-    };
+    let button = xdotool_click_button(button);
     vec![
         "mousemove".to_string(),
         "--sync".to_string(),
@@ -4258,6 +4300,21 @@ fn xdotool_click_args(x: i32, y: i32, button: Option<&str>, click_count: u32) ->
     ]
 }
 
+fn xdotool_click_button(button: Option<&str>) -> &'static str {
+    match button
+        .unwrap_or("left")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "right" => "3",
+        "middle" => "2",
+        "side" | "back" => "8",
+        "extra" | "forward" => "9",
+        _ => "1",
+    }
+}
+
 fn xdotool_scroll_args(target: Option<(i32, i32)>, direction: &str, units: i32) -> Vec<String> {
     let mut args = Vec::new();
     if let Some((x, y)) = target {
@@ -4268,20 +4325,32 @@ fn xdotool_scroll_args(target: Option<(i32, i32)>, direction: &str, units: i32) 
             y.to_string(),
         ]);
     }
-    let button = match direction.trim().to_ascii_lowercase().as_str() {
+    let button = xdotool_scroll_button(direction);
+    args.extend([
+        "click".to_string(),
+        "--repeat".to_string(),
+        units.clamp(1, 100).to_string(),
+        "--delay".to_string(),
+        XDOTOOL_SCROLL_DELAY_MS.to_string(),
+        button.to_string(),
+    ]);
+    args
+}
+
+fn xdotool_scroll_button(direction: &str) -> &'static str {
+    match direction.trim().to_ascii_lowercase().as_str() {
         "up" => "4",
         "down" => "5",
         "left" => "6",
         "right" => "7",
         _ => unreachable!("scroll direction is validated before backend selection"),
-    };
-    args.extend([
-        "click".to_string(),
-        "--repeat".to_string(),
-        units.clamp(1, 100).to_string(),
-        button.to_string(),
-    ]);
-    args
+    }
+}
+
+fn xdotool_scroll_timeout(units: i32) -> Duration {
+    XDOTOOL_TIMEOUT.saturating_add(Duration::from_millis(
+        XDOTOOL_SCROLL_DELAY_MS.saturating_mul(units.clamp(1, 100) as u64),
+    ))
 }
 
 /// Build one xdotool invocation so the button remains held for the complete
@@ -4328,15 +4397,50 @@ async fn run_xdotool_pointer(
     args: &[String],
     held_button: Option<&str>,
     timeout_duration: Duration,
-) -> std::result::Result<Output, String> {
+) -> std::result::Result<Output, XdotoolCommandError> {
     let mut mouseup_guard = held_button.map(XdotoolMouseupGuard::new);
-    let result = run_xdotool_command(args, timeout_duration).await;
+    let mut result = run_xdotool_command(args, timeout_duration).await;
     if result.is_ok() {
         if let Some(guard) = mouseup_guard.as_mut() {
             guard.disarm();
         }
+    } else if let Some(guard) = mouseup_guard.as_mut() {
+        let cleanup_args = vec!["mouseup".to_string(), guard.button().to_string()];
+        let cleanup_result = run_xdotool_command(&cleanup_args, XDOTOOL_TIMEOUT).await;
+        // If this future is cancelled while cleanup is in flight, the still
+        // armed Drop guard remains the last-resort release path.
+        match cleanup_result {
+            Ok(_) => guard.disarm(),
+            Err(cleanup_error) => {
+                if let Err(error) = &mut result {
+                    error.message.push_str(&format!(
+                        "; ordered mouseup cleanup also failed: {}",
+                        cleanup_error.message
+                    ));
+                }
+                // Leave armed so Drop performs one detached, reaped retry.
+            }
+        }
     }
     result
+}
+
+#[derive(Debug)]
+struct XdotoolCommandError {
+    message: String,
+    may_have_delivered: bool,
+}
+
+impl std::fmt::Display for XdotoolCommandError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl XdotoolCommandError {
+    fn safe_to_fallback(&self) -> bool {
+        !self.may_have_delivered
+    }
 }
 
 struct XdotoolMouseupGuard {
@@ -4362,6 +4466,12 @@ impl XdotoolMouseupGuard {
 
     fn disarm(&mut self) {
         self.button = None;
+    }
+
+    fn button(&self) -> &str {
+        self.button
+            .as_deref()
+            .expect("button is present while release guard is armed")
     }
 }
 
@@ -4391,26 +4501,37 @@ fn spawn_reaped_xdotool_mouseup(button: &str) {
 async fn run_xdotool_command(
     args: &[String],
     timeout_duration: Duration,
-) -> std::result::Result<Output, String> {
+) -> std::result::Result<Output, XdotoolCommandError> {
     let mut command = TokioCommand::new("xdotool");
     command
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let output = timeout(timeout_duration, command.output())
+    let child = command.spawn().map_err(|error| XdotoolCommandError {
+        message: format!("failed to run xdotool: {error}"),
+        may_have_delivered: false,
+    })?;
+    let output = timeout(timeout_duration, child.wait_with_output())
         .await
-        .map_err(|_| {
-            format!(
+        .map_err(|_| XdotoolCommandError {
+            message: format!(
                 "xdotool timed out after {}s",
                 timeout_duration.as_secs_f32()
-            )
+            ),
+            may_have_delivered: true,
         })?
-        .map_err(|error| format!("failed to run xdotool: {error}"))?;
+        .map_err(|error| XdotoolCommandError {
+            message: format!("failed while waiting for xdotool: {error}"),
+            may_have_delivered: true,
+        })?;
     if output.status.success() {
         Ok(output)
     } else {
-        Err(command_output_error("xdotool", output))
+        Err(XdotoolCommandError {
+            message: command_output_error("xdotool", output),
+            may_have_delivered: true,
+        })
     }
 }
 
@@ -4427,6 +4548,121 @@ async fn run_ydotool_sequence(
     Ok(outputs)
 }
 
+async fn run_ydotool_held_sequence(
+    before_press: &[Vec<String>],
+    press: &[String],
+    while_held: &[Vec<String>],
+    release: &[String],
+) -> std::result::Result<Vec<Output>, String> {
+    let mut outputs = run_ydotool_sequence(before_press).await?;
+    let mut release_guard = YdotoolReleaseGuard::new(release);
+
+    if !before_press.is_empty() {
+        sleep(Duration::from_millis(35)).await;
+    }
+    match run_ydotool(press).await {
+        Ok(output) => outputs.push(output),
+        Err(error) => {
+            return Err(
+                ydotool_failure_after_ordered_release(error, release, &mut release_guard).await,
+            );
+        }
+    }
+    for command in while_held {
+        sleep(Duration::from_millis(35)).await;
+        match run_ydotool(command).await {
+            Ok(output) => outputs.push(output),
+            Err(error) => {
+                return Err(ydotool_failure_after_ordered_release(
+                    error,
+                    release,
+                    &mut release_guard,
+                )
+                .await);
+            }
+        }
+    }
+    sleep(Duration::from_millis(35)).await;
+    match run_ydotool(release).await {
+        Ok(output) => {
+            outputs.push(output);
+            release_guard.disarm();
+            Ok(outputs)
+        }
+        Err(error) => {
+            Err(ydotool_failure_after_ordered_release(error, release, &mut release_guard).await)
+        }
+    }
+}
+
+async fn ydotool_failure_after_ordered_release(
+    error: String,
+    release: &[String],
+    guard: &mut YdotoolReleaseGuard,
+) -> String {
+    match run_ydotool(release).await {
+        Ok(_) => {
+            guard.disarm();
+            format!("{error}; the held mouse button was released during cleanup")
+        }
+        Err(cleanup_error) => {
+            format!("{error}; ordered mouse-button release cleanup also failed: {cleanup_error}")
+        }
+    }
+}
+
+struct YdotoolReleaseGuard {
+    release: Option<Vec<String>>,
+    cleanup: fn(&[String]),
+}
+
+impl YdotoolReleaseGuard {
+    fn new(release: &[String]) -> Self {
+        Self {
+            release: Some(release.to_vec()),
+            cleanup: spawn_reaped_ydotool_release,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_cleanup(release: &[String], cleanup: fn(&[String])) -> Self {
+        Self {
+            release: Some(release.to_vec()),
+            cleanup,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.release = None;
+    }
+}
+
+impl Drop for YdotoolReleaseGuard {
+    fn drop(&mut self) {
+        if let Some(release) = self.release.as_deref() {
+            (self.cleanup)(release);
+        }
+    }
+}
+
+fn spawn_reaped_ydotool_release(release: &[String]) {
+    let release = release.to_vec();
+    let socket = ydotool_socket();
+    let _ = std::thread::Builder::new()
+        .name("codex-ydotool-release".to_string())
+        .spawn(move || {
+            let mut command = Command::new("ydotool");
+            command
+                .args(&release)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            if let Some(socket) = socket {
+                command.env("YDOTOOL_SOCKET", socket);
+            }
+            let _ = command.status();
+        });
+}
+
 async fn run_ydotool(args: &[String]) -> std::result::Result<Output, String> {
     let mut command = TokioCommand::new("ydotool");
     command.args(args);
@@ -4435,6 +4671,7 @@ async fn run_ydotool(args: &[String]) -> std::result::Result<Output, String> {
     }
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
+    command.kill_on_drop(true);
 
     match command.spawn() {
         Ok(child) => match wait_for_ydotool_output(child).await {
@@ -4870,6 +5107,16 @@ fn ydotool_socket() -> Option<String> {
         .map(|path| path.display().to_string())
 }
 
+fn complete_ydotool_runtime_available() -> bool {
+    let executable_available = command_succeeds("sh", &["-c", "command -v ydotool"]);
+    let daemon_running = command_succeeds("pgrep", &["-a", "ydotoold"]);
+    let socket_connectable = ydotool_socket()
+        .map(PathBuf::from)
+        .as_ref()
+        .is_some_and(ydotool_socket_connects);
+    complete_ydotool_policy(executable_available, daemon_running, socket_connectable)
+}
+
 fn explicit_ydotool_socket() -> Option<String> {
     if let Ok(socket) = env::var("YDOTOOL_SOCKET") {
         let socket = socket.trim();
@@ -5109,10 +5356,16 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static XDOTOOL_MOUSEUP_CLEANUPS: AtomicUsize = AtomicUsize::new(0);
+    static YDOTOOL_RELEASE_CLEANUPS: AtomicUsize = AtomicUsize::new(0);
 
     fn record_xdotool_mouseup(button: &str) {
         assert_eq!(button, "1");
         XDOTOOL_MOUSEUP_CLEANUPS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn record_ydotool_release(release: &[String]) {
+        assert_eq!(release, ["click".to_string(), "0x80".to_string()]);
+        YDOTOOL_RELEASE_CLEANUPS.fetch_add(1, Ordering::SeqCst);
     }
 
     struct EnvVarGuard {
@@ -6102,6 +6355,24 @@ mod tests {
         assert_eq!(XDOTOOL_MOUSEUP_CLEANUPS.load(Ordering::SeqCst), 1);
     }
 
+    #[tokio::test]
+    async fn ydotool_pointer_cancellation_runs_armed_release_cleanup() {
+        YDOTOOL_RELEASE_CLEANUPS.store(0, Ordering::SeqCst);
+        let release = ["click".to_string(), "0x80".to_string()];
+        let (armed_tx, armed_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _guard = YdotoolReleaseGuard::with_cleanup(&release, record_ydotool_release);
+            let _ = armed_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        armed_rx.await.unwrap();
+
+        task.abort();
+        let _ = task.await;
+
+        assert_eq!(YDOTOOL_RELEASE_CLEANUPS.load(Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn xdotool_scroll_maps_direction_to_x11_wheel_button() {
         assert_eq!(
@@ -6114,9 +6385,33 @@ mod tests {
                 "click",
                 "--repeat",
                 "5",
+                "--delay",
+                "10",
                 "5",
             ]
         );
+    }
+
+    #[test]
+    fn xdotool_scroll_maximum_has_explicit_delay_and_sufficient_timeout() {
+        let args = xdotool_scroll_args(None, "up", 100);
+
+        assert_eq!(args, vec!["click", "--repeat", "100", "--delay", "10", "4"]);
+        assert_eq!(xdotool_scroll_timeout(100), Duration::from_secs(6));
+    }
+
+    #[test]
+    fn xdotool_fallback_is_allowed_only_before_process_start() {
+        assert!(XdotoolCommandError {
+            message: "spawn failed".to_string(),
+            may_have_delivered: false,
+        }
+        .safe_to_fallback());
+        assert!(!XdotoolCommandError {
+            message: "timed out".to_string(),
+            may_have_delivered: true,
+        }
+        .safe_to_fallback());
     }
 
     #[test]
