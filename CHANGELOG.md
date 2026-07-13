@@ -13,9 +13,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   including continuous multi-point drawing and window-relative gestures.
 - A shared upstream DMG acceptance profile now produces the same structured
   decision for local installs, updater rebuilds, and scheduled CI. Scheduled
-  rejections create one fingerprinted drift issue and supersede issues for
-  older DMGs. Acceptance evaluates only the user's enabled Linux features and
-  preserves the working app if any enabled feature drifts.
+  rejections fail visibly and retain the fingerprinted decision and reports as
+  artifacts without requiring repository Issues. Acceptance evaluates only the
+  user's enabled Linux features and preserves the working app if any enabled
+  feature drifts.
 - Nix module configurations can select the opt-in `mcp-helper-reaper`
   feature. Its Rust helper is supplied by a reproducible Nix derivation and is
   not added to the default package closure.
@@ -71,8 +72,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 - Automated user-local updates no longer inherit or set developer overrides
   that could replace a running Electron app or bypass DMG acceptance. Manual
   and timer rebuilds now fail safely at promotion, transactional installs retain
-  only the immediately previous app backup, and drift issue automation mutates
-  only issues carrying its valid fingerprint marker.
+  only the immediately previous app backup.
 - The Add Project folder picker is no longer parented to the Codex window on
   Linux X11. This avoids a GNOME Shell modal input grab that could lock desktop
   input and flood system logs, while preserving parented dialogs on Wayland,

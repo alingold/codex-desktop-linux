@@ -66,7 +66,7 @@ Good issue reports usually include:
 The recommended local setup is:
 
 ```bash
-git clone https://github.com/ilysenko/codex-desktop-linux.git
+git clone https://github.com/alingold/codex-desktop-linux.git
 cd codex-desktop-linux
 bash scripts/install-deps.sh
 ```

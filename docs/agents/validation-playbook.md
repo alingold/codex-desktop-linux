@@ -53,11 +53,10 @@ Local installs and scheduled CI share `scripts/validate-upstream-dmg.js` and
 `scripts/lib/upstream-dmg-release-profile.js`. Acceptance must inspect only the
 features recorded as enabled in the candidate patch report. Add fixtures
 proving enabled feature drift rejects promotion and disabled features are not
-probed. Exercise decision and issue behavior with:
+probed. Exercise decision behavior with:
 
 ```bash
 node --test scripts/ci/upstream-dmg-acceptance.test.js
-node --test scripts/ci/upstream-dmg-issue.test.js
 ```
 
 ## Rust Crates

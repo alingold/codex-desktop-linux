@@ -7,12 +7,12 @@ is the only component that decides whether the candidate can be promoted.
 
 ## Verdicts
 
-| Verdict | Meaning | Local promotion | Scheduled issue |
+| Verdict | Meaning | Local promotion | Scheduled CI |
 |---|---|---:|---:|
-| `accepted` | Build and every required release check passed | yes | close obsolete drift issues |
-| `accepted_with_warnings` | Only fail-soft core diagnostics drifted | yes | close obsolete drift issues |
-| `rejected` | A required core/integrity check or an enabled Linux Feature drifted | no | create or update the current fingerprint issue |
-| `inconclusive` | Reports are missing or an infrastructure failure prevented a decision | no | no change |
+| `accepted` | Build and every required release check passed | yes | pass and upload evidence |
+| `accepted_with_warnings` | Only fail-soft core diagnostics drifted | yes | pass and upload evidence |
+| `rejected` | A required core/integrity check or an enabled Linux Feature drifted | no | fail and upload evidence |
+| `inconclusive` | Reports are missing or an infrastructure failure prevented a decision | no | fail and upload available evidence |
 
 The profile derives required core patches from patch descriptors and reads the
 enabled feature set from the candidate's patch report. It never enables a
@@ -61,20 +61,12 @@ Cleanup keeps the state-referenced DMG and removes older managed hashes plus
 temporary files abandoned by an interrupted download; unrelated files and
 symlinks are ignored.
 
-## Drift Issue Lifecycle
+## Scheduled Evidence
 
-Scheduled runs use the DMG SHA-256 as the identity and the app version only as
-a display value. One `upstream-dmg-drift` issue is kept per rejected fingerprint.
-When a new fingerprint arrives, open issues for older DMGs are closed as
-superseded. An accepted new DMG closes all remaining drift issues. Before any
-mutation, the issue job compares the tested HTTP identity with the current DMG
-headers so rerunning an obsolete workflow cannot reopen an old issue. The
-identity must contain an ETag or both Last-Modified and Content-Length. If
-either the tested or current identity is unavailable, reconciliation makes no
-issue changes.
-Only issues carrying both the label and a valid hidden 64-character fingerprint
-marker are managed. Manually created labeled issues and malformed markers are
-never updated, reopened, superseded, or closed by the workflow.
+Scheduled runs use the DMG SHA-256 as the candidate identity and upload the
+decision, patch report, and rebuild reports as workflow artifacts. Rejected or
+inconclusive verdicts fail the workflow visibly. This does not depend on GitHub
+Issues being enabled and never mutates repository issue state.
 
 ## Manual Validation
 
