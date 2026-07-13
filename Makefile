@@ -350,7 +350,9 @@ install:
 		"$(CURDIR)/scripts/sudo-with-alert.sh" dpkg -i "$$deb"; \
 	else \
 		echo "[make] No supported package manager found (dpkg, rpm, zypper, or pacman)." >&2; exit 1; \
-	fi
+	fi; \
+	INSTALL_DIR="/opt/$(PACKAGE_NAME)" CODEX_APP_ID="$(PACKAGE_NAME)" CODEX_APP_DISPLAY_NAME="ChatGPT Desktop" \
+		bash -c '. "$$1"; warn_if_running_install_requires_restart' _ "$(CURDIR)/scripts/lib/process-detection.sh"
 
 service-enable:
 	@echo "[make] Enabling and starting codex-update-manager.service"

@@ -4,6 +4,11 @@ Linux Computer Use is an opt-in UI surface backed by a native Rust MCP backend,
 `codex-computer-use-linux`. The backend is bundled and registered by default;
 the in-app Computer Use controls are disabled until you opt in.
 
+After rebuilding or installing an update, fully quit every running Codex window
+and reopen the app once. The launcher refreshes bundled plugin caches and tool
+registration only during a cold start; opening another window on an older
+running process cannot activate a newly installed backend.
+
 It supports:
 
 - app listing and accessibility trees through AT-SPI

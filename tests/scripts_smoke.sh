@@ -3310,6 +3310,7 @@ test_setup_native_wizard_summary_keeps_existing_config() {
     local workspace="$TMP_DIR/setup-native-summary"
     local features_root="$workspace/linux-features"
     local config="$workspace/features.json"
+    local settings="$workspace/settings.json"
     local output_log="$workspace/output.log"
 
     make_wizard_feature_root "$features_root"
@@ -3318,6 +3319,7 @@ test_setup_native_wizard_summary_keeps_existing_config() {
 JSON
 
     CODEX_BOOTSTRAP_NONINTERACTIVE=1 \
+    CODEX_LINUX_SETTINGS_FILE="$settings" \
     CODEX_LINUX_FEATURES_ROOT="$features_root" \
     CODEX_LINUX_FEATURES_CONFIG="$config" \
         bash "$REPO_DIR/scripts/bootstrap-wizard.sh" >"$output_log"
@@ -3326,6 +3328,8 @@ JSON
     assert_contains "$output_log" "Enabled Linux features: remote-mobile-control"
     assert_contains "$output_log" "Default native package mode includes codex-update-manager"
     assert_contains "$output_log" "make install-native"
+    assert_contains "$output_log" "Computer Use build plan: native backend=bundled; in-app UI=not configured"
+    assert_contains "$output_log" "Bundled plugin and tool registration is refreshed only during a cold start"
 }
 
 test_setup_native_wizard_lists_local_features() {
@@ -4726,7 +4730,9 @@ test_bundled_plugin_builders_accept_prebuilt_binaries() {
     local cosmic="$workspace/codex-computer-use-cosmic"
     local host="$workspace/codex-chrome-extension-host"
     local chatgpt_icon="$workspace/chatgpt.png"
-    local staged_plugins="$workspace/plugins"
+    local install_dir="$workspace/install"
+    local staged_plugins="$install_dir/resources/plugins/openai-bundled/plugins"
+    local settings="$workspace/settings.json"
     local output_log="$workspace/output.log"
 
     mkdir -p "$workspace"
@@ -4734,10 +4740,13 @@ test_bundled_plugin_builders_accept_prebuilt_binaries() {
     printf '#!/usr/bin/env bash\n' > "$cosmic"
     printf '#!/usr/bin/env bash\n' > "$host"
     printf '%s\n' 'chatgpt-icon' > "$chatgpt_icon"
+    printf '%s\n' '{"codex-linux-computer-use-ui-enabled":true}' > "$settings"
     chmod +x "$backend" "$cosmic" "$host"
 
     (
         SCRIPT_DIR="$REPO_DIR"
+        INSTALL_DIR="$install_dir"
+        CODEX_LINUX_SETTINGS_FILE="$settings"
         CODEX_LINUX_COMPUTER_USE_BACKEND_SOURCE="$backend"
         CODEX_LINUX_COMPUTER_USE_COSMIC_SOURCE="$cosmic"
         CODEX_CHROME_EXTENSION_HOST_SOURCE="$host"
@@ -4751,6 +4760,7 @@ test_bundled_plugin_builders_accept_prebuilt_binaries() {
         build_linux_computer_use_backend
         build_chrome_extension_host
         stage_linux_computer_use_plugin "$staged_plugins"
+        print_linux_computer_use_build_summary
     ) > "$output_log" 2>&1
 
     assert_contains "$output_log" "Using prebuilt Linux Computer Use backend"
@@ -4758,6 +4768,8 @@ test_bundled_plugin_builders_accept_prebuilt_binaries() {
     assert_contains "$output_log" "$backend"
     assert_contains "$output_log" "$cosmic"
     assert_contains "$output_log" "$host"
+    assert_contains "$output_log" "Computer Use build: native backend=bundled; in-app UI=enabled"
+    assert_contains "$output_log" "fully quit and reopen the app once"
     cmp -s "$chatgpt_icon" "$staged_plugins/computer-use/assets/app-icon.png" \
         || fail "Expected the bundled Computer Use plugin to use the selected ChatGPT icon"
     [ ! -e "$staged_plugins/computer-use/bin/computer-use-linux-cosmic" ] \
@@ -6121,6 +6133,8 @@ EOF
     assert_contains "$REPO_DIR/scripts/lib/process-detection.sh" "assert_install_target_not_running"
     assert_contains "$REPO_DIR/scripts/lib/process-detection.sh" "find_running_install_target_pid"
     assert_contains "$REPO_DIR/scripts/lib/process-detection.sh" "ChatGPT Desktop is currently running from"
+    assert_contains "$REPO_DIR/launcher/start.sh.template" "abort_if_running_app_needs_restart"
+    assert_contains "$REPO_DIR/launcher/start.sh.template" "refresh bundled plugin/tool registration"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "prompt_install_missing_cli"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "prompt-install-cli"
     assert_contains "$REPO_DIR/launcher/start.sh.template" '.npm-global/bin/codex'
@@ -6674,6 +6688,49 @@ test_process_detection_helper_cmdline_shapes() {
         cmdline_has_electron_helper_type "$space_cmdline" || exit 1
         ! cmdline_has_electron_helper_type "$main_cmdline" || exit 1
     ) || fail "Electron helper detection must handle NUL-separated and space-joined cmdline formats"
+}
+
+test_process_detection_finds_replaced_running_app() {
+    info "Checking installed-app detection after an executable is replaced"
+    local workspace="$TMP_DIR/replaced-running-app"
+    local install_dir="$workspace/codex-app"
+    local output_log="$workspace/output.log"
+    local running_pid
+
+    mkdir -p "$install_dir"
+    cp "$(type -P sleep)" "$install_dir/electron"
+    "$install_dir/electron" 30 &
+    running_pid=$!
+    for _attempt in $(seq 1 50); do
+        [ "$(readlink "/proc/$running_pid/exe" 2>/dev/null || true)" = "$install_dir/electron" ] && break
+        sleep 0.01
+    done
+    [ "$(readlink "/proc/$running_pid/exe" 2>/dev/null || true)" = "$install_dir/electron" ] || {
+        kill "$running_pid" 2>/dev/null || true
+        wait "$running_pid" 2>/dev/null || true
+        fail "Test Electron fixture did not start"
+    }
+    mv "$install_dir/electron" "$install_dir/electron.previous"
+    cp "$TRUE_BIN" "$install_dir/electron"
+
+    (
+        INSTALL_DIR="$install_dir"
+        CODEX_APP_ID="codex-desktop"
+        CODEX_APP_DISPLAY_NAME="ChatGPT Desktop"
+        # shellcheck disable=SC1091
+        source "$REPO_DIR/scripts/lib/process-detection.sh"
+        [ "$(find_running_install_target_pid)" = "$running_pid" ]
+        warn_if_running_install_requires_restart
+    ) >"$output_log" 2>&1 || {
+        kill "$running_pid" 2>/dev/null || true
+        wait "$running_pid" 2>/dev/null || true
+        fail "Replaced installed executable hid its still-running app process"
+    }
+
+    kill "$running_pid" 2>/dev/null || true
+    wait "$running_pid" 2>/dev/null || true
+    assert_contains "$output_log" "process predates the package just installed"
+    assert_contains "$output_log" "Fully quit it, then reopen the app"
 }
 
 test_side_by_side_launcher_identity() {
@@ -9694,6 +9751,7 @@ main() {
     test_launcher_cli_resolution_policy
     test_webview_server_cache_policy
     test_process_detection_helper_cmdline_shapes
+    test_process_detection_finds_replaced_running_app
     test_webview_probe_equivalence
     test_side_by_side_launcher_identity
     test_linux_file_manager_patch_smoke

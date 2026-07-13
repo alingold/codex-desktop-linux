@@ -1650,3 +1650,29 @@ install_bundled_plugin_resources() {
 
     info "Linux-safe bundled plugins installed"
 }
+
+computer_use_ui_build_state() {
+    if node -e \
+        'process.exit(require(process.argv[1]).isComputerUseUiEnabled() ? 0 : 1)' \
+        "$SCRIPT_DIR/scripts/patches/impl/computer-use.js"; then
+        printf 'enabled\n'
+    else
+        printf 'disabled\n'
+    fi
+}
+
+print_linux_computer_use_build_summary() {
+    local plugin_dir="$INSTALL_DIR/resources/plugins/openai-bundled/plugins/computer-use"
+    local backend="$plugin_dir/bin/codex-computer-use-linux"
+    local cosmic_helper="$plugin_dir/bin/codex-computer-use-cosmic"
+    local ui_state
+
+    ui_state="$(computer_use_ui_build_state)"
+    if [ -x "$backend" ] && [ -x "$cosmic_helper" ]; then
+        info "Computer Use build: native backend=bundled; in-app UI=$ui_state"
+    else
+        warn "Computer Use build: native backend=unavailable; in-app UI=$ui_state"
+    fi
+    info "Computer Use input runtime: host-selected (/dev/uinput, desktop portal, xdotool, or ydotool); optional host helpers are not embedded in native packages"
+    info "Computer Use activation: after installing this build, fully quit and reopen the app once so the bundled plugin and tool schema register during cold startup"
+}

@@ -1944,6 +1944,29 @@ find_running_app_pid() {
     return 1
 }
 
+running_app_uses_installed_electron() {
+    local pid="$1"
+    local running_identity=""
+    local installed_identity=""
+
+    running_identity="$(stat -Lc '%d:%i' "/proc/$pid/exe" 2>/dev/null || true)"
+    installed_identity="$(stat -Lc '%d:%i' "$SCRIPT_DIR/electron" 2>/dev/null || true)"
+    [ -n "$running_identity" ] && [ "$running_identity" = "$installed_identity" ]
+}
+
+abort_if_running_app_needs_restart() {
+    local detail
+
+    [ -n "${RUNNING_APP_PID:-}" ] || return 0
+    pid_matches_executable "$RUNNING_APP_PID" "$SCRIPT_DIR/electron" || return 0
+    running_app_uses_installed_electron "$RUNNING_APP_PID" && return 0
+
+    detail="A newer $CODEX_LINUX_APP_DISPLAY_NAME build is installed, but pid $RUNNING_APP_PID is still running the previous Electron binary. Fully quit the app, then reopen it. A cold start is required to load the new build and refresh bundled plugin/tool registration."
+    launcher_notice "RESTART REQUIRED: $detail"
+    notify_error "$detail"
+    exit 75
+}
+
 pid_in_same_launch_instance() {
     # The /proc scan matches by electron binary path, which side-by-side
     # multi-launch instances share with the default app. Match instance
@@ -3805,6 +3828,8 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
 
+abort_if_running_app_needs_restart
+
 if send_warm_start_launch_action "${LAUNCHER_ARGS[@]}"; then
     echo "Sent launch args over warm-start IPC"
     log_phase "warm_start_ipc_sent"
@@ -3912,6 +3937,7 @@ if needs_cold_start; then
     log_phase "launcher_lock_ready"
     refresh_launch_state_quick
     log_phase "launch_state_refreshed_under_lock"
+    abort_if_running_app_needs_restart
     if [ "$LAUNCHER_LOCK_TIMED_OUT" -eq 1 ]; then
         reap_orphaned_runtime_processes
         detect_cross_install_conflict

@@ -351,6 +351,7 @@ main() {
         info "Patch report: $INSTALL_DIR/.codex-linux/patch-report.json"
     fi
     write_build_info "$dmg_path" "$app_dir"
+    print_linux_computer_use_build_summary
 
     if [ -n "${CODEX_REBUILD_REPORT_JSON:-}" ] && [ -n "${CODEX_PATCH_REPORT_JSON:-}" ]; then
         write_rebuild_report_json \

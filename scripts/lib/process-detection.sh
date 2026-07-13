@@ -34,6 +34,16 @@ pid_is_electron_helper() {
     cmdline_has_electron_helper_type "/proc/$pid/cmdline"
 }
 
+pid_cmdline_arg0_path() {
+    local pid="$1"
+    local actual=""
+
+    [ -r "/proc/$pid/cmdline" ] || return 1
+    IFS= read -r -d '' actual < "/proc/$pid/cmdline" || [ -n "$actual" ] || return 1
+    [ -n "$actual" ] || return 1
+    canonical_path "$actual"
+}
+
 pid_matches_install_target() {
     local pid="$1"
     local expected="$2"
@@ -42,10 +52,24 @@ pid_matches_install_target() {
     [[ "$pid" =~ ^[0-9]+$ ]] || return 1
     [ -d "/proc/$pid" ] || return 1
     pid_is_current_user "$pid" || return 1
-    actual="$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)"
+    # Match argv[0], not /proc/<pid>/exe. A package manager can atomically
+    # replace Electron while the old process remains alive; its procfs
+    # executable then ends in " (deleted)", but argv[0] still identifies the
+    # install it came from.
+    actual="$(pid_cmdline_arg0_path "$pid" 2>/dev/null || true)"
     [ -n "$actual" ] || return 1
     [ "$actual" = "$(canonical_path "$expected")" ] || return 1
     ! pid_is_electron_helper "$pid"
+}
+
+warn_if_running_install_requires_restart() {
+    local pid=""
+
+    if pid="$(find_running_install_target_pid)"; then
+        printf '%s\n' \
+            "[WARN] $CODEX_APP_DISPLAY_NAME is still running from $INSTALL_DIR (pid $pid)." \
+            "[WARN] That process predates the package just installed. Fully quit it, then reopen the app so bundled plugins and tools are registered from the new build." >&2
+    fi
 }
 
 find_running_install_target_pid() {
