@@ -4737,7 +4737,7 @@ test_bundled_plugin_builders_accept_prebuilt_binaries() {
     (
         SCRIPT_DIR="$REPO_DIR"
         INSTALL_DIR="$install_dir"
-        CODEX_LINUX_SETTINGS_FILE="$settings"
+        export CODEX_LINUX_SETTINGS_FILE="$settings"
         CODEX_LINUX_COMPUTER_USE_BACKEND_SOURCE="$backend"
         CODEX_LINUX_COMPUTER_USE_COSMIC_SOURCE="$cosmic"
         CODEX_CHROME_EXTENSION_HOST_SOURCE="$host"
