@@ -3609,27 +3609,13 @@ test_setup_native_wizard_runs_bounded_computer_use_doctor() {
     cat > "$doctor" <<'SCRIPT'
 #!/usr/bin/env bash
 [ "${1:-}" = "doctor" ] || exit 2
-cat <<'JSON'
-{
-  "readiness": {
-    "can_register_mcp_tools": true,
-    "can_build_accessibility_tree": true,
-    "can_query_windows": true,
-    "can_focus_apps": true,
-    "can_focus_windows": true,
-    "can_send_development_input": true,
-    "recommended_next_step": "Computer Use is ready.",
-    "blockers": []
-  },
-  "capabilities": {
-    "preferred": {
-      "input": "ydotool",
-      "screenshot": "portal",
-      "window_control": "x11_ewmh"
-    }
-  }
-}
-JSON
+[ "${2:-}" = "--summary" ] || exit 2
+printf '%s\n' \
+    'Computer Use doctor result: READY' \
+    'Capabilities: mcp=yes accessibility=yes windows=yes app_focus=yes exact_focus=yes input=yes screenshot=yes' \
+    'Input actions: click=ydotool drag=ydotool draw_path=ydotool press_key=ydotool scroll=ydotool type_text=ydotool' \
+    'Preferred backends: input=ydotool screenshot=portal window_control=x11_ewmh' \
+    'Recommended next step: Computer Use is ready.'
 SCRIPT
     chmod +x "$doctor"
 
@@ -3644,6 +3630,7 @@ SCRIPT
 
     assert_contains "$output_log" "Computer Use doctor result: READY"
     assert_contains "$output_log" "accessibility=yes windows=yes app_focus=yes exact_focus=yes input=yes screenshot=yes"
+    assert_contains "$output_log" "draw_path=ydotool"
     assert_contains "$output_log" "input=ydotool screenshot=portal window_control=x11_ewmh"
 
     cat > "$doctor" <<'SCRIPT'
