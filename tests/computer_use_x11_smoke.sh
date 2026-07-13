@@ -3,6 +3,9 @@ set -euo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 backend="${COMPUTER_USE_BIN:-$repo_dir/target/debug/codex-computer-use-linux}"
+# Each readiness poll sleeps for 100 ms. Loaded CI runners have taken slightly
+# over five seconds to start Metacity, so keep one explicit 15-second budget.
+readiness_attempts=150
 
 for command in metacity xdotool xmessage xdpyinfo node timeout zenity; do
     command -v "$command" >/dev/null || {
@@ -82,7 +85,7 @@ if { exec 9<>/dev/uinput; } 2>/dev/null; then
     )
 fi
 
-for _ in $(seq 1 50); do
+for _ in $(seq 1 "$readiness_attempts"); do
     xdpyinfo >/dev/null 2>&1 && break
     sleep 0.1
 done
@@ -94,7 +97,7 @@ xdpyinfo >/dev/null 2>&1 || {
 
 metacity --replace >"$work_dir/metacity.log" 2>&1 &
 wm_pid=$!
-for _ in $(seq 1 50); do
+for _ in $(seq 1 "$readiness_attempts"); do
     xprop -root _NET_SUPPORTING_WM_CHECK 2>/dev/null | grep -q '# 0x' && break
     sleep 0.1
 done
@@ -127,7 +130,7 @@ node -e '
 ' "$doctor_file"
 
 windows_file="$work_dir/windows.json"
-for _ in $(seq 1 50); do
+for _ in $(seq 1 "$readiness_attempts"); do
     "${backend_command[@]}" "$backend" windows >"$windows_file" 2>/dev/null || true
     node -e '
       const report = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
@@ -252,7 +255,7 @@ zenity --entry --title='Codex X11 Unicode Fixture' --text='Unicode runtime fixtu
     >"$work_dir/unicode.txt" 2>"$work_dir/unicode.err" &
 text_pid=$!
 unicode_id=""
-for _ in $(seq 1 50); do
+for _ in $(seq 1 "$readiness_attempts"); do
     "${backend_command[@]}" "$backend" windows >"$windows_file" 2>/dev/null || true
     unicode_id="$(node -e '
       const report = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
@@ -270,7 +273,7 @@ done
 
 mcp_call 7 type_text "{\"window_id\":$unicode_id,\"text\":\"$unicode_text\"}"
 mcp_call 8 press_key "{\"window_id\":$unicode_id,\"key\":\"Enter\"}"
-for _ in $(seq 1 50); do
+for _ in $(seq 1 "$readiness_attempts"); do
     ! kill -0 "$text_pid" 2>/dev/null && break
     sleep 0.1
 done
