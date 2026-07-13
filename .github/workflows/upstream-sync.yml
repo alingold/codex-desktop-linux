@@ -47,24 +47,13 @@ jobs:
             "+refs/heads/${UPSTREAM_BRANCH}:refs/remotes/upstream/${UPSTREAM_BRANCH}"
           git fetch --no-tags origin \
             "+refs/heads/${BASE_BRANCH}:refs/remotes/origin/${BASE_BRANCH}"
-          git fetch --no-tags origin \
-            "+refs/heads/${SYNC_BRANCH}:refs/remotes/origin/${SYNC_BRANCH}" || true
 
           base_ref="refs/remotes/origin/${BASE_BRANCH}"
           upstream_ref="refs/remotes/upstream/${UPSTREAM_BRANCH}"
-          sync_ref="refs/remotes/origin/${SYNC_BRANCH}"
 
           if git merge-base --is-ancestor "$upstream_ref" "$base_ref"; then
             echo "result=up-to-date" >> "$GITHUB_OUTPUT"
             echo "Base already contains the current upstream branch." >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-
-          if git show-ref --verify --quiet "$sync_ref" \
-            && git merge-base --is-ancestor "$base_ref" "$sync_ref" \
-            && git merge-base --is-ancestor "$upstream_ref" "$sync_ref"; then
-            echo "result=pending-review" >> "$GITHUB_OUTPUT"
-            echo "The existing sync pull request already covers the current base and upstream heads." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 

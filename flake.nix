@@ -357,8 +357,8 @@
           python3
           systemd
           xdg-utils
+          xdotool
         ]);
-        computerUseRuntimePath = pkgs.lib.makeBinPath [ pkgs.xdotool ];
         globalDictationRuntimePath = pkgs.lib.makeBinPath (with pkgs; [
           xdotool
           xinput
@@ -583,7 +583,6 @@ PY
           };
           payloadLauncherPath =
             launcherPath
-            + pkgs.lib.optionalString enableComputerUseUi ":${computerUseRuntimePath}"
             + pkgs.lib.optionalString
               (builtins.elem "global-dictation" normalizedLinuxFeatureIds)
               ":${globalDictationRuntimePath}";

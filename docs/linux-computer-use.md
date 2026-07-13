@@ -58,8 +58,8 @@ sudo zypper install xdotool
 ```
 
 The deb and RPM packages recommend `xdotool`, and the Arch package lists it as
-an optional dependency. Nix Computer Use UI outputs place `xdotool` on the app
-launcher `PATH`; the base Nix output does not add it.
+an optional dependency. Every Nix output places `xdotool` on the app launcher
+`PATH` because the Computer Use backend is available in every package variant.
 
 If `xdotool` is absent, X11 text entry falls back safely to the regular
 keyboard backend before changing the clipboard. Install `ydotool` when you

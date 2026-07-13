@@ -199,8 +199,8 @@ Computer Use UI only:
 nix run github:alingold/codex-desktop-linux#codex-desktop-computer-use-ui
 ```
 
-The Computer Use UI outputs include `xdotool` on the application launcher
-`PATH` for full-Unicode X11 text entry. The base output remains unchanged.
+Every Nix output includes `xdotool` on the application launcher `PATH` because
+the Computer Use backend is available in every package variant.
 
 The Home Manager and NixOS modules accept these feature IDs through
 `programs.codexDesktopLinux.linuxFeatures`:
