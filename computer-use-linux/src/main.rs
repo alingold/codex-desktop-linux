@@ -29,11 +29,17 @@ async fn main() -> Result<()> {
         Some("mcp") => server::serve_mcp().await,
         Some("doctor") => {
             let report = diagnostics::doctor_report();
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&report)
-                    .context("failed to serialize doctor report")?
-            );
+            match std::env::args().nth(2).as_deref() {
+                None => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report)
+                        .context("failed to serialize doctor report")?
+                ),
+                Some("--summary") => println!("{}", diagnostics::doctor_summary(&report)),
+                Some(option) => {
+                    anyhow::bail!("unknown doctor option '{option}'. Expected: doctor [--summary]")
+                }
+            }
             Ok(())
         }
         Some("setup") => {
@@ -166,6 +172,6 @@ async fn main() -> Result<()> {
 
 fn print_help() {
     println!(
-        "codex-computer-use-linux\n\nUsage:\n  codex-computer-use-linux mcp\n  codex-computer-use-linux doctor\n  codex-computer-use-linux setup\n  codex-computer-use-linux setup-window-targeting\n  codex-computer-use-linux apps\n  codex-computer-use-linux state [APP_NAME]\n  codex-computer-use-linux screenshot\n  codex-computer-use-linux windows"
+        "codex-computer-use-linux\n\nUsage:\n  codex-computer-use-linux mcp\n  codex-computer-use-linux doctor [--summary]\n  codex-computer-use-linux setup\n  codex-computer-use-linux setup-window-targeting\n  codex-computer-use-linux apps\n  codex-computer-use-linux state [APP_NAME]\n  codex-computer-use-linux screenshot\n  codex-computer-use-linux windows"
     );
 }

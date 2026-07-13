@@ -208,6 +208,92 @@ pub fn doctor_report() -> DoctorReport {
     }
 }
 
+/// Render the stable, human-facing subset used by setup and support flows.
+/// The full `doctor` JSON remains the machine-readable source of detail.
+pub fn doctor_summary(report: &DoctorReport) -> String {
+    let readiness = &report.readiness;
+    let screenshot_ready = report.capabilities.preferred.screenshot.is_some();
+    let checks = [
+        ("mcp", readiness.can_register_mcp_tools),
+        ("accessibility", readiness.can_build_accessibility_tree),
+        ("windows", readiness.can_query_windows),
+        ("app_focus", readiness.can_focus_apps),
+        ("exact_focus", readiness.can_focus_windows),
+        ("input", readiness.can_send_development_input),
+        ("screenshot", screenshot_ready),
+    ];
+    let ready = checks.iter().all(|(_, ready)| *ready) && readiness.blockers.is_empty();
+    let yes_no = |ready: bool| if ready { "yes" } else { "no" };
+    let mut lines = vec![
+        format!(
+            "Computer Use doctor result: {}",
+            if ready { "READY" } else { "DEGRADED" }
+        ),
+        format!(
+            "Capabilities: {}",
+            checks
+                .iter()
+                .map(|(name, ready)| format!("{name}={}", yes_no(*ready)))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+        format!(
+            "Input actions: {}",
+            readiness
+                .input_actions
+                .iter()
+                .map(|(name, action)| format!(
+                    "{name}={}",
+                    action.backend.as_deref().unwrap_or("unavailable")
+                ))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+        format!(
+            "Preferred backends: input={} screenshot={} window_control={}",
+            report
+                .capabilities
+                .preferred
+                .input
+                .as_deref()
+                .unwrap_or("none"),
+            report
+                .capabilities
+                .preferred
+                .screenshot
+                .as_deref()
+                .unwrap_or("none"),
+            report
+                .capabilities
+                .preferred
+                .window_control
+                .as_deref()
+                .unwrap_or("none"),
+        ),
+    ];
+    lines.extend(
+        readiness
+            .blockers
+            .iter()
+            .map(|blocker| format!("Blocker: {blocker}")),
+    );
+    if !screenshot_ready {
+        lines.push(
+            "Blocker: No screenshot backend was detected; enable a supported desktop or XDG Screenshot portal backend."
+                .to_string(),
+        );
+    }
+    lines.push(format!(
+        "Recommended next step: {}",
+        if !screenshot_ready && readiness.blockers.is_empty() {
+            "Enable a supported screenshot backend, then rerun doctor --summary."
+        } else {
+            readiness.recommended_next_step.as_str()
+        }
+    ));
+    lines.join("\n")
+}
+
 /// Cheap, focused portal probe for pointer fallback selection. Runtime actions
 /// call this only after native input backends fail, avoiding the previous
 /// session-type guess that incorrectly excluded capable X11 desktops.
@@ -1484,6 +1570,45 @@ mod tests {
         assert!(readiness.input_actions.values().all(|action| {
             action.backend.as_deref() == Some("xdotool_x11") && action.remediation.is_none()
         }));
+    }
+
+    #[test]
+    fn doctor_summary_uses_action_readiness_without_reinterpreting_backends() {
+        let mut platform = platform_report();
+        platform.xdg_session_type = Some("x11".to_string());
+        platform.wayland_display = None;
+        platform.gnome_shell_screenshot = Check::fail("missing");
+        platform.gnome_screenshot = Check::fail("missing");
+        let mut portals = portal_report(Check::ok("RemoteDesktop portal"));
+        portals.screenshot = Check::ok("Screenshot portal");
+        let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
+        let mut windowing = windowing_report(true, true);
+        windowing.codex_gnome_shell_extension_screenshot = Check::fail("missing");
+        let mut input = input_report_parts(
+            Check::fail("ydotool missing"),
+            Check::fail("ydotoold not running"),
+            Check::fail("no socket"),
+            Check::fail("/dev/uinput unavailable"),
+        );
+        input.xdotool = Check::ok("/usr/bin/xdotool");
+        let readiness = readiness_report(&platform, &portals, &accessibility, &windowing, &input);
+        let capabilities = capability_map(&platform, &portals, &accessibility, &windowing, &input);
+        let report = DoctorReport {
+            platform,
+            portals,
+            accessibility,
+            windowing,
+            input,
+            readiness,
+            capabilities,
+        };
+
+        let summary = doctor_summary(&report);
+
+        assert!(summary.contains("Computer Use doctor result: READY"));
+        assert!(summary.contains("draw_path=xdotool_x11"));
+        assert!(summary.contains("screenshot=portal"));
+        assert!(!summary.contains("Blocker:"));
     }
 
     #[test]
