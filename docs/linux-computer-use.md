@@ -175,13 +175,13 @@ upstream server-side availability.
 Nix:
 
 ```bash
-nix run github:ilysenko/codex-desktop-linux#codex-desktop-computer-use-ui
+nix run github:alingold/codex-desktop-linux#codex-desktop-computer-use-ui
 ```
 
 Combined with a Linux feature output:
 
 ```bash
-nix run github:ilysenko/codex-desktop-linux#computer-use-ui-remote-mobile-control
+nix run github:alingold/codex-desktop-linux#computer-use-ui-remote-mobile-control
 ```
 
 ## Side-By-Side Dev Variant
