@@ -676,7 +676,7 @@ PY
                 "ChatGPT Desktop for Linux"
               else
                 "ChatGPT Desktop for Linux with ${pkgs.lib.concatStringsSep ", " featureIds} enabled";
-            homepage = "https://github.com/ilysenko/codex-desktop-linux";
+            homepage = "https://github.com/alingold/codex-desktop-linux";
             license = pkgs.lib.licenses.mit;
             platforms = pkgs.lib.platforms.linux;
             mainProgram = "codex-desktop";
