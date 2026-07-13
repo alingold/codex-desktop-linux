@@ -57,6 +57,25 @@ jobs:
             exit 0
           fi
 
+          open_pr_count="$(gh pr list \
+            --repo "$GITHUB_REPOSITORY" \
+            --base "$BASE_BRANCH" \
+            --head "$SYNC_BRANCH" \
+            --state open \
+            --json number \
+            --jq 'length')"
+          if [ "$open_pr_count" -gt 0 ]; then
+            git fetch --no-tags origin \
+              "+refs/heads/${SYNC_BRANCH}:refs/remotes/origin/${SYNC_BRANCH}"
+            sync_ref="refs/remotes/origin/${SYNC_BRANCH}"
+            if git merge-base --is-ancestor "$base_ref" "$sync_ref" \
+              && git merge-base --is-ancestor "$upstream_ref" "$sync_ref"; then
+                echo "result=pending-review" >> "$GITHUB_OUTPUT"
+                echo "The open sync pull request already covers the current base and upstream heads." >> "$GITHUB_STEP_SUMMARY"
+                exit 0
+            fi
+          fi
+
           git checkout -B "$SYNC_BRANCH" "$base_ref"
           if ! git merge --no-ff --no-edit "$upstream_ref"; then
             conflict_file="$RUNNER_TEMP/upstream-sync-conflicts.txt"
