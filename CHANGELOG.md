@@ -7,6 +7,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- Linux Computer Use now reports readiness per input action and backend, with a
+  compact `doctor --summary` view shared by the native setup flow. X11 pointer
+  actions use native `xdotool` input when direct absolute input is unavailable,
+  including continuous multi-point drawing and window-relative gestures.
 - A shared upstream DMG acceptance profile now produces the same structured
   decision for local installs, updater rebuilds, and scheduled CI. Scheduled
   rejections create one fingerprinted drift issue and supersede issues for
@@ -23,6 +27,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 
+- The reviewed weekly upstream-sync workflow reports merge conflicts directly
+  in its failed run instead of depending on repository Issues being enabled.
+- Native setup and package builds now state whether the Computer Use backend and
+  UI are enabled, and the launcher refuses to hand off to an Electron process
+  that predates the installed build until the app is fully quit and reopened.
 - Remote mobile control now relies on the current upstream account-enrollment
   compatibility and Connections tab resolver instead of patching duplicate
   Linux-specific fallbacks into those paths.
@@ -35,6 +44,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
+- Pointer failure and cancellation paths now release held mouse buttons before
+  trying another backend, preserve the errors from each attempted backend, and
+  avoid reporting an action ready when its runtime path cannot perform it.
 - Approval notifications now preserve the upstream Approve, Approve for
   session, and Decline actions on Linux. A small freedesktop notification
   bridge forwards the action and close signals that Electron's Linux
