@@ -294,14 +294,6 @@ pub fn doctor_summary(report: &DoctorReport) -> String {
     lines.join("\n")
 }
 
-/// Cheap, focused portal probe for pointer fallback selection. Runtime actions
-/// call this only after native input backends fail, avoiding the previous
-/// session-type guess that incorrectly excluded capable X11 desktops.
-pub(crate) fn remote_desktop_portal_available() -> bool {
-    hydrate_session_bus_env();
-    portal_interface_check("org.freedesktop.portal.RemoteDesktop").ok
-}
-
 /// Derive the per-layer backend capability map from the individual checks. Lists
 /// are ordered best-first and mirror the order the tool actually tries them.
 fn capability_map(
@@ -320,17 +312,23 @@ fn capability_map(
     if input.uinput.ok {
         input_backends.push("abs_pointer".to_string());
     }
-    if x11_xdotool {
-        input_backends.push("xdotool_x11".to_string());
-    }
-    if !x11_xdotool && ydotool {
-        input_backends.push("ydotool".to_string());
-    }
-    if portals.remote_desktop.ok {
-        input_backends.push("portal".to_string());
-    }
-    if x11_xdotool && ydotool {
-        input_backends.push("ydotool".to_string());
+    if is_x11_platform(platform) {
+        if x11_xdotool {
+            input_backends.push("xdotool_x11".to_string());
+        }
+        if portals.remote_desktop.ok {
+            input_backends.push("portal".to_string());
+        }
+        if ydotool {
+            input_backends.push("ydotool".to_string());
+        }
+    } else {
+        if ydotool {
+            input_backends.push("ydotool".to_string());
+        }
+        if portals.remote_desktop.ok {
+            input_backends.push("portal".to_string());
+        }
     }
 
     let mut screenshot_backends = Vec::new();
@@ -862,36 +860,71 @@ fn input_action_readiness(
     input: &InputReport,
 ) -> BTreeMap<String, InputActionReadiness> {
     let x11_xdotool = is_x11_platform(platform) && input.xdotool.ok;
+    let x11 = is_x11_platform(platform);
+    let kde_wayland = is_kde_wayland_platform(platform);
     let portal = portals.remote_desktop.ok;
     let ydotool = complete_ydotool_available(input);
 
     let pointer_backend = || {
-        preferred_input_backend(&[
-            (input.uinput.ok, "abs_pointer"),
-            (x11_xdotool, "xdotool_x11"),
-            (ydotool && !x11_xdotool, "ydotool"),
-            (portal, "portal"),
-            (ydotool, "ydotool"),
-        ])
+        if x11 {
+            preferred_input_backend(&[
+                (input.uinput.ok, "abs_pointer"),
+                (x11_xdotool, "xdotool_x11"),
+                (portal, "portal"),
+                (ydotool, "ydotool"),
+            ])
+        } else {
+            preferred_input_backend(&[
+                (input.uinput.ok, "abs_pointer"),
+                (ydotool, "ydotool"),
+                (portal, "portal"),
+            ])
+        }
     };
     // The absolute pointer deliberately does not implement wheel input, while
     // the other pointer backends do.
-    let non_absolute_backend = || {
-        preferred_input_backend(&[
-            (x11_xdotool, "xdotool_x11"),
-            (ydotool && !x11_xdotool, "ydotool"),
-            (portal, "portal"),
-            (ydotool, "ydotool"),
-        ])
+    let pointer_without_absolute = || {
+        if x11 {
+            preferred_input_backend(&[
+                (x11_xdotool, "xdotool_x11"),
+                (portal, "portal"),
+                (ydotool, "ydotool"),
+            ])
+        } else {
+            preferred_input_backend(&[(ydotool, "ydotool"), (portal, "portal")])
+        }
+    };
+    let keyboard_backend = || {
+        if x11 {
+            preferred_input_backend(&[(x11_xdotool, "xdotool_x11"), (ydotool, "ydotool")])
+        } else {
+            preferred_input_backend(&[(ydotool, "ydotool"), (portal, "portal")])
+        }
+    };
+    let type_text_backend = || {
+        if kde_wayland {
+            preferred_input_backend(&[(ydotool, "ydotool")])
+        } else {
+            keyboard_backend()
+        }
     };
     let mut actions = BTreeMap::new();
     for name in ["click", "drag", "draw_path"] {
         actions.insert(name.to_string(), input_action(pointer_backend()));
     }
-    actions.insert("scroll".to_string(), input_action(non_absolute_backend()));
-    for name in ["press_key", "type_text"] {
-        actions.insert(name.to_string(), input_action(non_absolute_backend()));
+    actions.insert(
+        "scroll".to_string(),
+        input_action(pointer_without_absolute()),
+    );
+    actions.insert("press_key".to_string(), input_action(keyboard_backend()));
+    let mut type_text = input_action(type_text_backend());
+    if kde_wayland && !type_text.ready {
+        type_text.remediation = Some(
+            "Install ydotool and start ydotoold with an accessible socket. KDE clipboard paste may work at runtime, but readiness does not claim it until Klipper availability can be verified."
+                .to_string(),
+        );
     }
+    actions.insert("type_text".to_string(), type_text);
     actions
 }
 
@@ -922,6 +955,19 @@ fn is_x11_platform(platform: &PlatformReport) -> bool {
         .as_deref()
         .is_some_and(|session| session.eq_ignore_ascii_case("x11"))
         || (platform.display.is_some() && platform.wayland_display.is_none())
+}
+
+fn is_kde_wayland_platform(platform: &PlatformReport) -> bool {
+    !is_x11_platform(platform)
+        && platform.xdg_session_type.as_deref() == Some("wayland")
+        && (platform
+            .xdg_current_desktop
+            .as_deref()
+            .is_some_and(|desktop| desktop.to_ascii_lowercase().contains("kde"))
+            || platform
+                .desktop_session
+                .as_deref()
+                .is_some_and(|session| session.to_ascii_lowercase().contains("plasma")))
 }
 
 fn is_cosmic_wayland_platform(platform: &PlatformReport) -> bool {
@@ -1653,10 +1699,59 @@ mod tests {
             &input,
         );
 
-        assert!(actions.values().all(|action| action.ready));
-        assert!(actions
-            .values()
-            .all(|action| action.backend.as_deref() == Some("portal")));
+        for action in ["click", "scroll", "drag", "draw_path"] {
+            assert_eq!(actions[action].backend.as_deref(), Some("portal"));
+        }
+        assert!(!actions["press_key"].ready);
+        assert!(!actions["type_text"].ready);
+    }
+
+    #[test]
+    fn x11_pointer_prefers_portal_after_missing_xdotool_but_keyboard_uses_ydotool() {
+        let mut platform = platform_report();
+        platform.xdg_session_type = Some("x11".to_string());
+        platform.wayland_display = None;
+        let mut input = input_report_parts(
+            Check::ok("ydotool"),
+            Check::ok("ydotoold"),
+            Check::ok("connectable socket"),
+            Check::fail("/dev/uinput unavailable"),
+        );
+        input.xdotool = Check::fail("xdotool missing");
+
+        let actions = input_action_readiness(
+            &platform,
+            &portal_report(Check::ok("RemoteDesktop portal")),
+            &input,
+        );
+
+        assert_eq!(actions["draw_path"].backend.as_deref(), Some("portal"));
+        assert_eq!(actions["scroll"].backend.as_deref(), Some("portal"));
+        assert_eq!(actions["press_key"].backend.as_deref(), Some("ydotool"));
+        assert_eq!(actions["type_text"].backend.as_deref(), Some("ydotool"));
+    }
+
+    #[test]
+    fn kde_wayland_portal_does_not_claim_type_text_without_known_clipboard_backend() {
+        let mut platform = platform_report();
+        platform.xdg_current_desktop = Some("KDE".to_string());
+        platform.desktop_session = Some("plasma".to_string());
+        let input = input_report_parts(
+            Check::fail("ydotool missing"),
+            Check::fail("ydotoold not running"),
+            Check::fail("no socket"),
+            Check::fail("/dev/uinput unavailable"),
+        );
+
+        let actions = input_action_readiness(
+            &platform,
+            &portal_report(Check::ok("RemoteDesktop portal")),
+            &input,
+        );
+
+        assert_eq!(actions["press_key"].backend.as_deref(), Some("portal"));
+        assert!(!actions["type_text"].ready);
+        assert!(actions["type_text"].backend.is_none());
     }
 
     #[test]
