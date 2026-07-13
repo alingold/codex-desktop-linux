@@ -13,6 +13,13 @@ const {
 const PATCH_MARKER = "codexLinuxWorkspaceRootOpenTarget";
 const MISSING_FILE_MANAGER_ACTION_REASON =
   "Workspace-root File Manager open action is not present in this upstream build";
+const WORKSPACE_ROOT_FILE_MANAGER_OPEN_CALL_SOURCE =
+  "([A-Za-z_$][\\w$]*)\\(\\{path:([A-Za-z_$][\\w$]*),cwd:([A-Za-z_$][\\w$]*)," +
+  "target:`fileManager`,openFile:([A-Za-z_$][\\w$]*)\\.mutate\\}\\)";
+const WORKSPACE_ROOT_FILE_MANAGER_OPEN_CALL = new RegExp(
+  WORKSPACE_ROOT_FILE_MANAGER_OPEN_CALL_SOURCE,
+  "u",
+);
 
 function warn(message) {
   console.warn(`WARN: ${message} - skipping Linux workspace-root open targets patch`);
@@ -192,7 +199,7 @@ function applyWorkspaceRootOpenTargetsPatch(currentSource, targets) {
     return currentSource;
   }
 
-  const openCallPattern = /([A-Za-z_$][\w$]*)\(\{path:([A-Za-z_$][\w$]*),cwd:([A-Za-z_$][\w$]*),target:`fileManager`,openFile:([A-Za-z_$][\w$]*)\.mutate\}\)/gu;
+  const openCallPattern = new RegExp(WORKSPACE_ROOT_FILE_MANAGER_OPEN_CALL_SOURCE, "gu");
   const edits = [];
   let matchedOpenCall = false;
   for (const openCallMatch of currentSource.matchAll(openCallPattern)) {
@@ -308,7 +315,7 @@ function patchWorkspaceRootOpenTargets(extractedDir) {
     }
     const filePath = path.join(assetsDir, name);
     const source = fs.readFileSync(filePath, "utf8");
-    if (!source.includes("target:`fileManager`")) {
+    if (!WORKSPACE_ROOT_FILE_MANAGER_OPEN_CALL.test(source)) {
       continue;
     }
     matched += 1;
