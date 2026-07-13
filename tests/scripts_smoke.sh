@@ -3826,8 +3826,8 @@ test_computer_use_optional_runtime_packaging() {
     assert_contains "$REPO_DIR/packaging/linux/codex-desktop.spec" "Recommends:.*xdotool"
     assert_not_contains "$REPO_DIR/packaging/linux/codex-desktop.spec" "Requires:.*xdotool"
     assert_contains "$REPO_DIR/packaging/linux/PKGBUILD.template" "xdotool: full-Unicode Computer Use text entry on X11"
-    assert_contains "$REPO_DIR/flake.nix" "optionals enableComputerUseUi \[ pkgs.xdotool \]"
-    assert_contains "$REPO_DIR/flake.nix" 'launcherPath enableComputerUseUi'
+    assert_contains "$REPO_DIR/flake.nix" 'computerUseRuntimePath = pkgs.lib.makeBinPath \[ pkgs.xdotool \]'
+    assert_contains "$REPO_DIR/flake.nix" 'optionalString enableComputerUseUi ":${computerUseRuntimePath}"'
 }
 
 test_setup_native_wizard_cleanup_requires_interactive_confirmation() {
