@@ -137,8 +137,20 @@ pub struct ReadinessReport {
     pub can_focus_apps: bool,
     pub can_focus_windows: bool,
     pub can_send_development_input: bool,
+    /// Runtime readiness for each input tool. Unlike the legacy aggregate
+    /// boolean, this makes partial installations explicit to agents and setup
+    /// tooling.
+    pub input_actions: BTreeMap<String, InputActionReadiness>,
     pub recommended_next_step: String,
     pub blockers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct InputActionReadiness {
+    pub ready: bool,
+    pub backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -196,6 +208,14 @@ pub fn doctor_report() -> DoctorReport {
     }
 }
 
+/// Cheap, focused portal probe for pointer fallback selection. Runtime actions
+/// call this only after native input backends fail, avoiding the previous
+/// session-type guess that incorrectly excluded capable X11 desktops.
+pub(crate) fn remote_desktop_portal_available() -> bool {
+    hydrate_session_bus_env();
+    portal_interface_check("org.freedesktop.portal.RemoteDesktop").ok
+}
+
 /// Derive the per-layer backend capability map from the individual checks. Lists
 /// are ordered best-first and mirror the order the tool actually tries them.
 fn capability_map(
@@ -206,17 +226,24 @@ fn capability_map(
     input: &InputReport,
 ) -> CapabilityMap {
     let mut input_backends = Vec::new();
-    // Absolute uinput pointer: accurate, non-blocking of coordinates; preferred.
+    let x11_xdotool = is_x11_platform(platform) && input.xdotool.ok;
+    let ydotool = complete_ydotool_available(input);
+    // Keep this order aligned with the runtime pointer fallback order. Native
+    // X11 input is preferred to a portal permission prompt; on Wayland a
+    // running ydotoold remains the prompt-free preferred fallback.
     if input.uinput.ok {
         input_backends.push("abs_pointer".to_string());
+    }
+    if x11_xdotool {
+        input_backends.push("xdotool_x11".to_string());
+    }
+    if !x11_xdotool && ydotool {
+        input_backends.push("ydotool".to_string());
     }
     if portals.remote_desktop.ok {
         input_backends.push("portal".to_string());
     }
-    if is_x11_platform(platform) && input.xdotool.ok {
-        input_backends.push("xdotool_x11_keyboard_text".to_string());
-    }
-    if input.ydotool_socket.ok {
+    if x11_xdotool && ydotool {
         input_backends.push("ydotool".to_string());
     }
 
@@ -646,7 +673,9 @@ fn check_from_backend_probe(probe: &registry::BackendProbe) -> Check {
 
 fn input_report() -> InputReport {
     InputReport {
-        xdotool: command_path_check("xdotool"),
+        // `command -v` is insufficient here: xdotool can be installed while
+        // unable to connect to this process's X11 display.
+        xdotool: command_check("xdotool", &["getmouselocation", "--shell"]),
         ydotool: command_path_check("ydotool"),
         ydotoold: process_check("ydotoold"),
         ydotool_socket: ydotool_socket_check(),
@@ -666,7 +695,8 @@ fn readiness_report(
     let can_query_windows = windowing.can_list_windows;
     let can_focus_apps = windowing.can_focus_apps;
     let can_focus_windows = windowing.can_focus_windows;
-    let can_send_development_input = can_send_development_input(platform, portals, input);
+    let input_actions = input_action_readiness(platform, portals, input);
+    let can_send_development_input = input_actions.values().all(|action| action.ready);
 
     if !can_build_accessibility_tree {
         blockers.push(
@@ -692,9 +722,16 @@ fn readiness_report(
     }
 
     if !can_send_development_input {
+        let unavailable = input_actions
+            .iter()
+            .filter(|(_, action)| !action.ready)
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
         blockers.push(
-            "Complete keyboard and pointer input is unavailable; enable XDG RemoteDesktop portal input or ydotool with a connectable ydotoold socket. On X11, xdotool plus read/write /dev/uinput is also complete; /dev/uinput access alone is pointer-only."
-                .to_string(),
+            format!(
+                "Complete keyboard and pointer input is unavailable for actions: {unavailable}. On X11 install xdotool. Otherwise enable XDG RemoteDesktop portal input or install ydotool and start ydotoold with a connectable socket; /dev/uinput access alone is pointer-only."
+            ),
         );
     }
 
@@ -713,7 +750,7 @@ fn readiness_report(
     } else if !can_focus_windows {
         "Enable an exact-focus window backend before using window_id, title, or terminal-targeted input.".to_string()
     } else if !can_send_development_input {
-        "Enable a complete input backend: enable the XDG RemoteDesktop portal or start ydotoold with a socket accessible to this desktop user. On X11, install xdotool and grant read/write /dev/uinput; /dev/uinput alone is pointer-only."
+        "Enable a complete input backend using the per-action remediation in input_actions. On X11, install xdotool. Otherwise enable the XDG RemoteDesktop portal or install ydotool and start ydotoold with a socket accessible to this desktop user."
             .to_string()
     } else {
         "Computer Use is ready: AT-SPI tree support, window targeting, and a Linux input backend are available."
@@ -727,19 +764,70 @@ fn readiness_report(
         can_focus_apps,
         can_focus_windows,
         can_send_development_input,
+        input_actions,
         recommended_next_step,
         blockers,
     }
 }
 
-fn can_send_development_input(
+fn input_action_readiness(
     platform: &PlatformReport,
     portals: &PortalReport,
     input: &InputReport,
-) -> bool {
-    portals.remote_desktop.ok
-        || input.ydotool.ok && input.ydotoold.ok && input.ydotool_socket.ok
-        || is_x11_platform(platform) && input.xdotool.ok && input.uinput.ok
+) -> BTreeMap<String, InputActionReadiness> {
+    let x11_xdotool = is_x11_platform(platform) && input.xdotool.ok;
+    let portal = portals.remote_desktop.ok;
+    let ydotool = complete_ydotool_available(input);
+
+    let pointer_backend = || {
+        preferred_input_backend(&[
+            (input.uinput.ok, "abs_pointer"),
+            (x11_xdotool, "xdotool_x11"),
+            (ydotool && !x11_xdotool, "ydotool"),
+            (portal, "portal"),
+            (ydotool, "ydotool"),
+        ])
+    };
+    // The absolute pointer deliberately does not implement wheel input, while
+    // the other pointer backends do.
+    let non_absolute_backend = || {
+        preferred_input_backend(&[
+            (x11_xdotool, "xdotool_x11"),
+            (ydotool && !x11_xdotool, "ydotool"),
+            (portal, "portal"),
+            (ydotool, "ydotool"),
+        ])
+    };
+    let mut actions = BTreeMap::new();
+    for name in ["click", "drag", "draw_path"] {
+        actions.insert(name.to_string(), input_action(pointer_backend()));
+    }
+    actions.insert("scroll".to_string(), input_action(non_absolute_backend()));
+    for name in ["press_key", "type_text"] {
+        actions.insert(name.to_string(), input_action(non_absolute_backend()));
+    }
+    actions
+}
+
+fn preferred_input_backend(candidates: &[(bool, &'static str)]) -> Option<&'static str> {
+    candidates
+        .iter()
+        .find_map(|(available, backend)| available.then_some(*backend))
+}
+
+fn input_action(backend: Option<&str>) -> InputActionReadiness {
+    InputActionReadiness {
+        ready: backend.is_some(),
+        backend: backend.map(str::to_string),
+        remediation: backend.is_none().then(|| {
+            "On X11 install xdotool (for example: sudo apt install xdotool). Otherwise enable the XDG RemoteDesktop portal or install ydotool and start ydotoold with an accessible socket."
+                .to_string()
+        }),
+    }
+}
+
+fn complete_ydotool_available(input: &InputReport) -> bool {
+    input.ydotool.ok && input.ydotoold.ok && input.ydotool_socket.ok
 }
 
 fn is_x11_platform(platform: &PlatformReport) -> bool {
@@ -1366,6 +1454,84 @@ mod tests {
 
         assert!(readiness.can_send_development_input);
         assert!(readiness.blockers.is_empty());
+    }
+
+    #[test]
+    fn x11_xdotool_is_a_complete_action_specific_backend() {
+        let mut platform = platform_report();
+        platform.xdg_session_type = Some("x11".to_string());
+        platform.wayland_display = None;
+        let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
+        let windowing = windowing_report(true, true);
+        let mut input = input_report_parts(
+            Check::fail("ydotool missing"),
+            Check::fail("ydotoold not running"),
+            Check::fail("no socket"),
+            Check::fail("/dev/uinput unavailable"),
+        );
+        input.xdotool = Check::ok("/usr/bin/xdotool");
+
+        let readiness = readiness_report(
+            &platform,
+            &portal_report(Check::fail("missing")),
+            &accessibility,
+            &windowing,
+            &input,
+        );
+
+        assert!(readiness.can_send_development_input);
+        assert!(readiness.input_actions.values().all(|action| action.ready));
+        assert!(readiness.input_actions.values().all(|action| {
+            action.backend.as_deref() == Some("xdotool_x11") && action.remediation.is_none()
+        }));
+    }
+
+    #[test]
+    fn pointer_only_uinput_reports_exact_unavailable_actions_and_remediation() {
+        let mut platform = platform_report();
+        platform.xdg_session_type = Some("x11".to_string());
+        platform.wayland_display = None;
+        let input = input_report_parts(
+            Check::fail("ydotool missing"),
+            Check::fail("ydotoold not running"),
+            Check::fail("no socket"),
+            Check::ok("read/write: /dev/uinput"),
+        );
+
+        let actions =
+            input_action_readiness(&platform, &portal_report(Check::fail("missing")), &input);
+
+        assert_eq!(actions["draw_path"].backend.as_deref(), Some("abs_pointer"));
+        assert!(!actions["scroll"].ready);
+        assert!(!actions["press_key"].ready);
+        assert!(actions["scroll"]
+            .remediation
+            .as_deref()
+            .is_some_and(|message| message.contains("install xdotool")));
+    }
+
+    #[test]
+    fn x11_portal_is_reported_when_native_pointer_input_is_unavailable() {
+        let mut platform = platform_report();
+        platform.xdg_session_type = Some("x11".to_string());
+        platform.wayland_display = None;
+        let input = input_report_parts(
+            Check::fail("ydotool missing"),
+            Check::fail("ydotoold not running"),
+            Check::fail("no socket"),
+            Check::fail("/dev/uinput unavailable"),
+        );
+
+        let actions = input_action_readiness(
+            &platform,
+            &portal_report(Check::ok("RemoteDesktop portal")),
+            &input,
+        );
+
+        assert!(actions.values().all(|action| action.ready));
+        assert!(actions
+            .values()
+            .all(|action| action.backend.as_deref() == Some("portal")));
     }
 
     #[test]

@@ -1027,28 +1027,6 @@ fn log(message: &str) {
 mod tests {
     use super::*;
 
-    struct FileModeGuard {
-        path: PathBuf,
-        original_mode: u32,
-    }
-
-    impl FileModeGuard {
-        fn make_private_executable(path: PathBuf) -> Self {
-            let original_mode = fs::metadata(&path).unwrap().permissions().mode();
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
-            Self {
-                path,
-                original_mode,
-            }
-        }
-    }
-
-    impl Drop for FileModeGuard {
-        fn drop(&mut self) {
-            let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(self.original_mode));
-        }
-    }
-
     #[test]
     fn frame_round_trip_uses_native_length_prefix() {
         let message = json!({ "jsonrpc": "2.0", "id": "1", "method": "ping" });
@@ -1263,12 +1241,11 @@ while True:
         let extension_id = "abcdefghijklmnopabcdefghijklmnop";
         // Validate through the private fixture tree rather than the Cargo
         // workspace parent chain, which may legitimately be group-writable on
-        // a shared development machine. A hard link preserves the executable
-        // identity checked by RuntimeManager.
-        let running_executable = fs::canonicalize("/proc/self/exe").unwrap();
-        let _mode_guard = FileModeGuard::make_private_executable(running_executable.clone());
+        // a shared development machine. RuntimeManager's test-only identity
+        // override lets the fixture remain an ordinary private copy.
         let extension_host_path = root.join("extension-host");
-        fs::hard_link(running_executable, &extension_host_path).unwrap();
+        fs::copy(std::env::current_exe().unwrap(), &extension_host_path).unwrap();
+        fs::set_permissions(&extension_host_path, fs::Permissions::from_mode(0o700)).unwrap();
         let manifest_path = root.join("chrome-native-hosts-v2.json");
         fs::write(
             &manifest_path,
