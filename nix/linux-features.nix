@@ -2,9 +2,13 @@
 let
   supportedFeatureIds = [
     "appshots"
+    "frameless-titlebar"
+    "global-dictation"
+    "mcp-helper-reaper"
     "node-repl-reaper"
     "open-target-discovery"
     "persistent-status-panel"
+    "pet-overlay"
     "remote-mobile-control"
   ];
 

@@ -1,9 +1,10 @@
 "use strict";
 
-const MODEL_PICKER_STATE_ASSET_PATTERN =
+const MODEL_PICKER_BUNDLE_PATTERN =
   /^app-initial~app-main~new-thread-panel-page~appgen-library-page~hotkey-window-thread-page~ho~iufn7mg3-[^.]+\.js$/;
-const MODEL_PICKER_MENU_ASSET_PATTERN =
-  /^app-initial~app-main~onboarding-page~hotkey-window-thread-page~quick-chat-window-page~chatg~k0ede4gb-[^.]+\.js$/;
+const MODEL_PICKER_STATE_ASSET_PATTERN = MODEL_PICKER_BUNDLE_PATTERN;
+const MODEL_PICKER_ALLOWLIST_ASSET_PATTERN = MODEL_PICKER_BUNDLE_PATTERN;
+const MODEL_PICKER_MENU_ASSET_PATTERN = MODEL_PICKER_BUNDLE_PATTERN;
 const SIMPLE_MENU_VIEW_PATTERN =
   /([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(`composer-model-picker-menu-view-v1`,`simple`\)/;
 const ADVANCED_MENU_VIEW_PATTERN =
@@ -168,9 +169,9 @@ function applyDynamicSupportedReasoningEffortsPatch(source, context = {}) {
     }
 
     const powerSelectionPattern = new RegExp(
-      `function (${JS_IDENT})\\((${JS_IDENT})\\)\\{let (${JS_IDENT})=(${JS_IDENT})` +
-        `\\((${JS_IDENT}),\\2\\);if\\(\\3\\.length>=4\\)return \\3;let (${JS_IDENT})=` +
-        `\\4\\((${JS_IDENT}),\\2\\);return \\6\\.length>=4\\?\\6:\\[\\]\\}`,
+      `function (${JS_IDENT})\\((${JS_IDENT}),(${JS_IDENT})=!1\\)\\{let (${JS_IDENT})=` +
+        `(${JS_IDENT})\\((.+?),\\2\\);if\\(\\4\\.length>=4\\)return \\4;let (${JS_IDENT})=` +
+        `\\5\\((${JS_IDENT}),\\2\\);return \\7\\.length>=4\\?\\7:\\[\\]\\}`,
     );
     const match = source.match(powerSelectionPattern);
     if (match == null) {
@@ -184,6 +185,7 @@ function applyDynamicSupportedReasoningEffortsPatch(source, context = {}) {
       original,
       resolverFunction,
       modelsVar,
+      includeUltraVar,
       primarySelectionsVar,
       supportedSelectionsFilter,
       primaryCandidates,
@@ -191,8 +193,8 @@ function applyDynamicSupportedReasoningEffortsPatch(source, context = {}) {
       fallbackCandidates,
     ] = match;
     const patched =
-      `function ${resolverFunction}(${modelsVar}){` +
-      `let ${primarySelectionsVar}=${supportedSelectionsFilter}(${primaryCandidates}.filter(` +
+      `function ${resolverFunction}(${modelsVar},${includeUltraVar}=!1){` +
+      `let ${primarySelectionsVar}=${supportedSelectionsFilter}((${primaryCandidates}).filter(` +
       `${modelsVar}=>${modelsVar}.model!==\`gpt-5.6-sol\`),${modelsVar}),` +
       `codexLinuxSolModel=${modelsVar}?.find(${modelsVar}=>${modelsVar}.model===\`gpt-5.6-sol\`),` +
       `codexLinuxSolSelections=codexLinuxSolModel==null?[]:` +
@@ -240,8 +242,8 @@ const descriptors = [
     phase: "webview-asset",
     order: 20_795,
     ciPolicy: "optional",
-    pattern: MODEL_PICKER_MENU_ASSET_PATTERN,
-    missingDescription: "composer model picker menu bundle",
+    pattern: MODEL_PICKER_ALLOWLIST_ASSET_PATTERN,
+    missingDescription: "composer model picker allowlist bundle",
     skipDescription: "ui-tweaks GPT-5.6 model allowlist patch",
     apply: (source, context = {}) =>
       applyGpt56AllowlistPatch(source, { ...context, warnOnMissingMarkers: true }),
@@ -280,6 +282,7 @@ module.exports = {
   GPT_56_ALLOWLIST_MARKER,
   INLINE_MODEL_LIST_RUNTIME_MARKER,
   MODEL_ALLOWLIST_MARKER,
+  MODEL_PICKER_ALLOWLIST_ASSET_PATTERN,
   MODEL_PICKER_MENU_ASSET_PATTERN,
   MODEL_PICKER_STATE_ASSET_PATTERN,
   MODEL_ROW_MARKER,
