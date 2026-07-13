@@ -188,7 +188,7 @@ function packageProfile(target) {
       label: "NixOS / Nix",
       packageManager: "flake",
       format: "runnable directly",
-      notes: "nix run github:ilysenko/codex-desktop-linux",
+      notes: "nix run github:alingold/codex-desktop-linux",
     };
   }
   if (["debian", "ubuntu", "pop", "linuxmint", "elementary"].some((value) => ids.has(value))) {

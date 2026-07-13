@@ -131,6 +131,10 @@ test("workspace root open targets patch scans current shared app main project ch
       ].join(""),
     );
     fs.writeFileSync(path.join(assetsDir, "app-main-current.js"), "console.log(`shell`);");
+    fs.writeFileSync(
+      path.join(assetsDir, "app-initial~app-main~projects-index-page~local-conversation-page-current.js"),
+      "function revealSource(){De({path:c,cwd:p(c),hostId:n,target:`fileManager`,openFile:o.mutate})}",
+    );
     const sharedChunkName = "app-initial~app-main~remote-conversation-page~projects-index-page-current.js";
     fs.writeFileSync(
       path.join(assetsDir, sharedChunkName),
@@ -148,7 +152,7 @@ test("workspace root open targets patch scans current shared app main project ch
     const result = patchWorkspaceRootOpenTargets(root);
     const patched = fs.readFileSync(path.join(assetsDir, sharedChunkName), "utf8");
 
-    assert.equal(result.changed, 1);
+    assert.deepEqual(result, { matched: 1, changed: 1 });
     assert.match(patched, /codexLinuxWorkspaceRootOpenTarget:vscode/);
     assert.match(patched, /codexLinuxWorkspaceRootOpenTarget:vscodeInsiders/);
     assert.match(patched, /codexLinuxWorkspaceRootOpenTarget:zed/);

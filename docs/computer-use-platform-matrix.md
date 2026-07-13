@@ -17,7 +17,7 @@ combination is certified.
 
 | Session/backend | Evidence | Window list/focus | Move/resize | Input | Screenshot | Accessibility |
 | --- | --- | --- | --- | --- | --- | --- |
-| Linux Mint Cinnamon / X11 | Live certified | EWMH | EWMH | native Unicode clipboard + xdotool paste chord, absolute uinput, portal, ydotool | GNOME-compatible DBus or portal | native Rust AT-SPI |
+| Linux Mint Cinnamon / X11 | Runtime tested; live certification pending | EWMH | EWMH | native xdotool pointer/gesture input, Unicode clipboard paste, absolute uinput, portal, ydotool | GNOME-compatible DBus or portal | native Rust AT-SPI |
 | Generic EWMH X11 / Metacity | Runtime tested | EWMH | EWMH | safety validation only in headless CI | not exercised in headless CI | not exercised in headless CI |
 | GNOME / Wayland or X11 | Implemented | Shell extension or Introspect | Shell extension | portal, absolute uinput, ydotool | Shell, extension, or portal | native Rust AT-SPI |
 | KDE Plasma / Wayland or X11 | Implemented | KWin scripting | KWin scripting where supported | portal, absolute uinput, ydotool | portal | native Rust AT-SPI |

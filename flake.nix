@@ -75,6 +75,17 @@
           cp -R ${./computer-use-linux} "$out/computer-use-linux"
           chmod -R u+w "$out"
         '';
+        notificationActionsBuildSource = pkgs.runCommandLocal "codex-notification-actions-linux-source" { } ''
+          mkdir -p "$out"
+          cp ${./Cargo.lock} "$out/Cargo.lock"
+          cat > "$out/Cargo.toml" <<'EOF'
+          [workspace]
+          members = ["notification-actions-linux"]
+          resolver = "2"
+          EOF
+          cp -R ${./notification-actions-linux} "$out/notification-actions-linux"
+          chmod -R u+w "$out"
+        '';
         nativeModulesBuildSupport = pkgs.runCommandLocal "codex-native-modules-build-support" { } ''
           mkdir -p "$out/scripts/lib"
           cp ${./scripts/lib/native-modules.sh} "$out/scripts/lib/native-modules.sh"
@@ -82,10 +93,10 @@
 
         codexDmg = pkgs.fetchurl {
           url = "https://persistent.oaistatic.com/codex-app-prod/ChatGPT.dmg";
-          hash = "sha256-RnolOBrylD8sm4eUra4os2QAvW2idT2vSIml/VUMTWU=";
+          hash = "sha256-1PxxelP97Pp2pzFH+qYJ9l4buvUtW0NEbMykwhpDA0c=";
         };
 
-        codexVersion = "26.707.41301";
+        codexVersion = "26.707.61608";
         electronVersion = "42.1.0";
         electronPlatform =
           {
@@ -157,6 +168,65 @@
             install -Dm0755 "$release_dir/codex-computer-use-linux" "$out/bin/codex-computer-use-linux"
             install -Dm0755 "$release_dir/codex-computer-use-cosmic" "$out/bin/codex-computer-use-cosmic"
             install -Dm0755 "$release_dir/codex-chrome-extension-host" "$out/bin/codex-chrome-extension-host"
+            runHook postInstall
+          '';
+        };
+
+        codexNotificationActionsBinary = pkgs.rustPlatform.buildRustPackage {
+          pname = "codex-notification-actions-linux";
+          version = "0.1.0";
+          src = notificationActionsBuildSource;
+
+          cargoLock = {
+            lockFile = ./Cargo.lock;
+          };
+
+          cargoBuildFlags = [
+            "-p"
+            "codex-notification-actions-linux"
+          ];
+
+          doCheck = true;
+
+          installPhase = ''
+            runHook preInstall
+            release_dir="target/''${CARGO_BUILD_TARGET:-${pkgs.stdenv.hostPlatform.rust.rustcTarget}}/release"
+            if [ ! -d "$release_dir" ]; then
+              release_dir="target/release"
+            fi
+            install -Dm0755 "$release_dir/codex-notification-actions-linux" "$out/bin/codex-notification-actions-linux"
+            runHook postInstall
+          '';
+        };
+
+        codexMcpHelperReaper = pkgs.rustPlatform.buildRustPackage {
+          pname = "codex-mcp-helper-reaper";
+          version = "0.1.0";
+          src = ./linux-features/mcp-helper-reaper/reaper;
+
+          cargoLock = {
+            lockFile = ./linux-features/mcp-helper-reaper/reaper/Cargo.lock;
+          };
+        };
+
+        codexGlobalDictationBinary = pkgs.rustPlatform.buildRustPackage {
+          pname = "codex-global-dictation-linux";
+          version = "0.1.0";
+          src = ./global-dictation-linux;
+
+          cargoLock = {
+            lockFile = ./global-dictation-linux/Cargo.lock;
+          };
+
+          doCheck = false;
+
+          installPhase = ''
+            runHook preInstall
+            release_dir="target/''${CARGO_BUILD_TARGET:-${pkgs.stdenv.hostPlatform.rust.rustcTarget}}/release"
+            if [ ! -d "$release_dir" ]; then
+              release_dir="target/release"
+            fi
+            install -Dm0755 "$release_dir/codex-global-dictation-linux" "$out/bin/codex-global-dictation-linux"
             runHook postInstall
           '';
         };
@@ -262,6 +332,7 @@
           libxi
           libxtst
           libxscrnsaver
+          libnotify
           libglvnd
           systemd
           wayland
@@ -273,7 +344,7 @@
           stdenv.cc.cc.lib
           zlib
         ]);
-        launcherPackages = with pkgs; [
+        launcherPath = pkgs.lib.makeBinPath (with pkgs; [
           bash
           coreutils
           curl
@@ -286,12 +357,13 @@
           python3
           systemd
           xdg-utils
-        ];
-        launcherPath = enableComputerUseUi:
-          pkgs.lib.makeBinPath (
-            launcherPackages
-            ++ pkgs.lib.optionals enableComputerUseUi [ pkgs.xdotool ]
-          );
+          xdotool
+        ]);
+        globalDictationRuntimePath = pkgs.lib.makeBinPath (with pkgs; [
+          xdotool
+          xinput
+          xmodmap
+        ]);
 
         patchNixInstalledApp = installDir: ''
           # Patch generated scripts for NixOS systems without /bin/bash.
@@ -299,9 +371,12 @@
             ${pkgs.gnused}/bin/sed -i '1s|^#!/bin/bash$|#!${pkgs.bash}/bin/bash|' "${installDir}/start.sh"
             if ! grep -q "NixOS Electron library path" "${installDir}/start.sh"; then
               # shellcheck disable=SC2016
-              ${pkgs.gnused}/bin/sed -i '2i# NixOS Electron library path for dlopen()ed GL/EGL libraries.\nexport LD_LIBRARY_PATH="${electronLibPath}:${runtimeLibPath}:''${LD_LIBRARY_PATH:-}"' "${installDir}/start.sh"
+              ${pkgs.gnused}/bin/sed -i '/^codex_capture_original_ld_library_path$/a\
+# NixOS Electron library path for dlopen()ed GL/EGL libraries.\
+export LD_LIBRARY_PATH="${electronLibPath}:${runtimeLibPath}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\
+codex_nixos_add_runtime_library_dirs' "${installDir}/start.sh"
             fi
-            if ! grep -q "codex_nixos_add_runtime_library_dirs" "${installDir}/start.sh"; then
+            if ! grep -q "codex_nixos_add_runtime_library_dirs()" "${installDir}/start.sh"; then
               # shellcheck disable=SC2016
               ${pkgs.gnused}/bin/sed -i '/^set -euo pipefail$/a\
 \
@@ -323,9 +398,7 @@ codex_nixos_add_runtime_library_dirs() {\
     done\
 \
     export LD_LIBRARY_PATH\
-}\
-\
-codex_nixos_add_runtime_library_dirs' "${installDir}/start.sh"
+}' "${installDir}/start.sh"
             fi
             if ! grep -q "Browser Use bundled marketplace metadata" "${installDir}/start.sh"; then
               ${pkgs.python3}/bin/python3 - "${installDir}/start.sh" <<'PY'
@@ -427,6 +500,7 @@ PY
             pkgs.patchelf
             pkgs.python3
             pkgs.unzip
+            pkgs.util-linux
           ];
 
           dontConfigure = true;
@@ -462,6 +536,13 @@ PY
             export CODEX_LINUX_COMPUTER_USE_BACKEND_SOURCE="${codexComputerUseBinaries}/bin/codex-computer-use-linux"
             export CODEX_LINUX_COMPUTER_USE_COSMIC_SOURCE="${codexComputerUseBinaries}/bin/codex-computer-use-cosmic"
             export CODEX_CHROME_EXTENSION_HOST_SOURCE="${codexComputerUseBinaries}/bin/codex-chrome-extension-host"
+            export CODEX_NOTIFICATION_ACTIONS_SOURCE="${codexNotificationActionsBinary}/bin/codex-notification-actions-linux"
+            ${pkgs.lib.optionalString (builtins.elem "mcp-helper-reaper" linuxFeatureIds) ''
+            export CODEX_MCP_HELPER_REAPER_SOURCE="${codexMcpHelperReaper}/bin/codex-mcp-helper-reaper"
+            ''}
+            ${pkgs.lib.optionalString (builtins.elem "global-dictation" linuxFeatureIds) ''
+            export CODEX_GLOBAL_DICTATION_LINUX_SOURCE="${codexGlobalDictationBinary}/bin/codex-global-dictation-linux"
+            ''}
             mkdir -p "$HOME" "$npm_config_cache" "$CARGO_HOME"
 
             source_dir="$TMPDIR/codex-source"
@@ -500,6 +581,11 @@ PY
             inherit enableComputerUseUi;
             linuxFeatureIds = normalizedLinuxFeatureIds;
           };
+          payloadLauncherPath =
+            launcherPath
+            + pkgs.lib.optionalString
+              (builtins.elem "global-dictation" normalizedLinuxFeatureIds)
+              ":${globalDictationRuntimePath}";
         in
         pkgs.stdenv.mkDerivation {
           pname = "codex-desktop${packageSuffix featureArgs}";
@@ -535,10 +621,30 @@ PY
               --unpack "{*.node,*.so,*.dylib}"
             rm -rf "$resources_dir/app-extracted"
 
-            if [ -f "$resources_dir/node_repl" ]; then
-              patchelf --set-interpreter "$(cat ${pkgs.stdenv.cc}/nix-support/dynamic-linker)" \
-                --set-rpath "${pkgs.lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib pkgs.glibc ]}" \
-                "$resources_dir/node_repl"
+            for node_repl_binary in \
+              "$resources_dir/node_repl" \
+              "$resources_dir/node_repl.codex-linux-original"; do
+              if [ -f "$node_repl_binary" ] \
+                  && [ "$(dd if="$node_repl_binary" bs=1 count=4 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "7f454c46" ]; then
+                patchelf --set-interpreter "$(cat ${pkgs.stdenv.cc}/nix-support/dynamic-linker)" \
+                  --set-rpath "${pkgs.lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib pkgs.glibc ]}" \
+                  "$node_repl_binary"
+              fi
+            done
+
+            if [ -f "$resources_dir/node_repl.codex-linux-original" ]; then
+              node_repl_interpreter="$(patchelf --print-interpreter \
+                "$resources_dir/node_repl.codex-linux-original")"
+              node_repl_rpath="$(patchelf --print-rpath \
+                "$resources_dir/node_repl.codex-linux-original")"
+              case "$node_repl_interpreter" in
+                /nix/store/*) ;;
+                *) echo "node_repl backup has non-Nix interpreter: $node_repl_interpreter" >&2; exit 1 ;;
+              esac
+              case "$node_repl_rpath" in
+                *"/nix/store/"*) ;;
+                *) echo "node_repl backup has non-Nix RPATH: $node_repl_rpath" >&2; exit 1 ;;
+              esac
             fi
 
             ${patchNixInstalledApp "$out/opt/codex-desktop"}
@@ -553,9 +659,7 @@ PY
               --replace-fail "/usr/share/applications/codex-desktop.desktop" "$out/share/applications/codex-desktop.desktop"
 
             makeWrapper "$out/opt/codex-desktop/start.sh" "$out/bin/codex-desktop" \
-              --prefix PATH : "${launcherPath enableComputerUseUi}" \
-              --prefix LD_LIBRARY_PATH : "${electronLibPath}" \
-              --prefix LD_LIBRARY_PATH : "${runtimeLibPath}" \
+              --prefix PATH : "${payloadLauncherPath}" \
               --prefix PATH : "/run/current-system/sw/bin" \
               --prefix PATH : "/etc/profiles/per-user/$(whoami)/bin"
 
@@ -571,7 +675,7 @@ PY
                 "ChatGPT Desktop for Linux"
               else
                 "ChatGPT Desktop for Linux with ${pkgs.lib.concatStringsSep ", " featureIds} enabled";
-            homepage = "https://github.com/ilysenko/codex-desktop-linux";
+            homepage = "https://github.com/alingold/codex-desktop-linux";
             license = pkgs.lib.licenses.mit;
             platforms = pkgs.lib.platforms.linux;
             mainProgram = "codex-desktop";
@@ -596,6 +700,9 @@ PY
         codexDesktopNixFeatureCheck = codexDesktop.override {
           linuxFeatureIds = [
             "appshots"
+            "frameless-titlebar"
+            "global-dictation"
+            "mcp-helper-reaper"
             "node-repl-reaper"
             "open-target-discovery"
             "persistent-status-panel"
@@ -635,6 +742,7 @@ PY
             cd "$source_dir"
             export CODEX_INSTALL_DIR="''${CODEX_INSTALL_DIR:-$root_dir/codex-app}"
             export CODEX_MANAGED_NODE_SOURCE="${pkgs.nodejs}"
+            export CODEX_NOTIFICATION_ACTIONS_SOURCE="${codexNotificationActionsBinary}/bin/codex-notification-actions-linux"
             ${pkgs.bash}/bin/bash "$source_dir/install.sh" "$source_dir/Codex.dmg" "$@"
 
             install_dir="''${CODEX_INSTALL_DIR:-$root_dir/codex-app}"
@@ -654,6 +762,11 @@ PY
         };
 
         checks = {
+          notification-actions-linux = codexNotificationActionsBinary;
+          notification-actions-installer = pkgs.runCommand "codex-notification-actions-installer-check" { } ''
+            grep -F 'CODEX_NOTIFICATION_ACTIONS_SOURCE=' ${installer}/bin/codex-desktop-installer >/dev/null
+            touch "$out"
+          '';
           nix-linux-features-evaluation = import ./nix/linux-features-test.nix {
             inherit pkgs self system;
           };

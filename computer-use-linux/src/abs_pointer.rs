@@ -88,8 +88,7 @@ impl AbsPointer {
             self.device
                 .emit(&[InputEvent::new_now(EventType::KEY.0, code, 1)])?;
             sleep(Duration::from_millis(30));
-            self.device
-                .emit(&[InputEvent::new_now(EventType::KEY.0, code, 0)])?;
+            self.release_button_with_retry(code)?;
             sleep(Duration::from_millis(40));
         }
         Ok(())
@@ -124,11 +123,29 @@ impl AbsPointer {
             .emit(&[InputEvent::new_now(EventType::KEY.0, code, 1)])?;
         sleep(point_delay);
         for &(x, y) in &points[1..] {
-            self.move_to(x, y)?;
+            if let Err(error) = self.move_to(x, y) {
+                return match self.release_button_with_retry(code) {
+                    Ok(()) => Err(error),
+                    Err(release_error) => Err(error.context(format!(
+                        "best-effort button release also failed: {release_error}"
+                    ))),
+                };
+            }
             sleep(point_delay);
         }
-        self.device
-            .emit(&[InputEvent::new_now(EventType::KEY.0, code, 0)])?;
+        self.release_button_with_retry(code)?;
+        Ok(())
+    }
+
+    fn release_button_with_retry(&mut self, code: u16) -> Result<()> {
+        if let Err(error) = self
+            .device
+            .emit(&[InputEvent::new_now(EventType::KEY.0, code, 0)])
+        {
+            self.device
+                .emit(&[InputEvent::new_now(EventType::KEY.0, code, 0)])
+                .with_context(|| format!("button release failed and retry also failed: {error}"))?;
+        }
         Ok(())
     }
 }

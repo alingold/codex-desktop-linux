@@ -7,7 +7,6 @@ const {
 } = require("../lib/minified-js.js");
 const {
   findCodexRequestWebviewAsset,
-  findImportedAsset,
   findRequiredWebviewAsset,
 } = require("../lib/assets.js");
 const {
@@ -19,6 +18,8 @@ const {
 const keybindsSettingsAsset = "keybinds-settings-linux.js";
 const linuxDesktopSettingsAsset = "linux-desktop-settings-linux.js";
 const linuxKeybindOverridesKey = "codex-linux-keybind-overrides";
+const linuxReactRuntimeExport = "codexLinuxReact";
+const linuxJsxRuntimeExport = "codexLinuxJsx";
 
 function linuxBuildInfoPanelSource() {
   return `function codexLinuxBuildInfoValue(value,fallback="unknown"){return typeof value=="string"&&value.trim().length>0?value:Array.isArray(value)&&value.length>0?value.join(", "):value==null?fallback:String(value)}function codexLinuxBuildInfoRows(payload){let info=payload?.info;if(!info)return [["Metadata file",codexLinuxBuildInfoValue(payload?.path,"not found")]];let target=info.linuxTarget??{},distro=target.distro??{},dmg=info.upstreamDmg??{},source=info.source??{},features=info.linuxFeatures?.enabled??[],profile=info.packageProfile??{},commit=source.commit||source.shortCommit||"",commitValue=commit?source.dirty?commit+" (dirty)":commit:"unknown",distroValue=distro.prettyName||[distro.id,distro.versionId].filter(Boolean).join(" ")||"unknown";return [["Metadata file",codexLinuxBuildInfoValue(payload?.path)],["Linux package profile",codexLinuxBuildInfoValue(profile.label)],["Linux source commit",commitValue,payload?.commitUrl],["Source branch",codexLinuxBuildInfoValue(source.branch)],["Generated",codexLinuxBuildInfoValue(info.generatedAt)],["Distro",distroValue],["Package manager",codexLinuxBuildInfoValue(target.packageManager??profile.packageManager)],["Package format",codexLinuxBuildInfoValue(target.packageFormat??profile.format)],["Enabled features",features.length>0?features.join(", "):"none"],["Upstream app version",codexLinuxBuildInfoValue(dmg.appVersion)],["Electron",codexLinuxBuildInfoValue(info.electronVersion)],["Upstream DMG SHA256",codexLinuxBuildInfoValue(dmg.sha256)]].filter(row=>row[1]!=null)}class LinuxBuildInfoPanel extends React.Component{constructor(props){super(props),this._alive=!1,this.state={data:null,isLoading:!0,error:null,copied:!1},this.load=this.load.bind(this),this.copyCommit=this.copyCommit.bind(this),this.openCommit=this.openCommit.bind(this),this.showDetails=this.showDetails.bind(this),this.fail=this.fail.bind(this)}componentDidMount(){this._alive=!0,this.load()}componentWillUnmount(){this._alive=!1}fail(err){this._alive&&this.setState({error:err instanceof Error?err.message:String(err)})}load(){this.setState({isLoading:!0,error:null}),__post("codex-linux-get-build-info",{}).then(result=>{this._alive&&this.setState({data:result})}).catch(this.fail).finally(()=>{this._alive&&this.setState({isLoading:!1})})}copyCommit(){let info=this.state.data?.info,commit=info?.source?.commit||"";commit&&(navigator.clipboard?.writeText?navigator.clipboard.writeText(commit).then(()=>{this._alive&&(this.setState({copied:!0}),setTimeout(()=>{this._alive&&this.setState({copied:!1})},1500))}).catch(this.fail):this.fail("Clipboard API is unavailable"))}openCommit(){(this.state.data?.commitUrl||"")&&__post("codex-linux-open-build-info-commit",{}).catch(this.fail)}showDetails(){__post("codex-linux-show-build-info",{}).catch(this.fail)}render(){let{data,isLoading,error,copied}=this.state,info=data?.info,commit=info?.source?.commit||"",commitUrl=data?.commitUrl||"",buttonClass="h-8 cursor-pointer rounded-md border border-token-border-default px-3 text-sm text-token-text-primary hover:bg-token-surface-secondary disabled:cursor-not-allowed disabled:opacity-60",rows=codexLinuxBuildInfoRows(data),actionsByLabel={"Metadata file":[{key:"details",label:"Details",disabled:!1,onClick:this.showDetails}],"Linux source commit":[{key:"copyCommit",label:"Copy commit",disabled:!commit,onClick:this.copyCommit},{key:"openCommit",label:"Open on GitHub",disabled:!commitUrl,onClick:this.openCommit}],"Generated":[{key:"refresh",label:"Refresh",disabled:isLoading,onClick:this.load}]},description=isLoading?$.jsx("span",{children:"Loading build metadata..."}):$.jsxs("div",{className:"flex flex-col gap-2 text-sm",children:[$.jsx("dl",{className:"grid gap-x-4 gap-y-3 rounded-md border border-token-border-default bg-token-bg-secondary p-3 sm:grid-cols-[150px_minmax(0,1fr)]",children:rows.map(([label,value,url])=>{let valueNode=url?$.jsx("a",{href:url,title:url,onClick:event=>{event.preventDefault(),this.openCommit()},className:"select-text break-all rounded bg-token-bg-primary px-1.5 py-0.5 font-mono text-xs text-token-text-primary underline decoration-token-text-tertiary underline-offset-2 hover:decoration-token-text-primary",children:value}):$.jsx("code",{className:"select-text break-all rounded bg-token-bg-primary px-1.5 py-0.5 font-mono text-xs text-token-text-primary",children:value}),actions=actionsByLabel[label]??[],rowContent=actions.length>0?$.jsxs("div",{className:"flex min-w-0 flex-col items-start gap-2",children:[valueNode,$.jsx("div",{className:"flex flex-wrap items-center gap-2",children:actions.map(action=>$.jsx("button",{type:"button",className:buttonClass,disabled:action.disabled,onClick:action.onClick,children:action.label},action.key))})]}):valueNode;return $.jsxs(React.Fragment,{children:[$.jsx("dt",{className:"text-token-text-tertiary",children:label}),$.jsx("dd",{className:"min-w-0",children:rowContent})]},label)})}),error?$.jsx("span",{className:"text-token-error-foreground",children:error}):null,copied?$.jsx("span",{className:"text-token-text-secondary",children:"Commit copied"}):null]});return $.jsx(SettingsRow,{label:"Build information",description,control:null})}}`;
@@ -157,11 +158,7 @@ function buildKeybindsSettingsSource({
 }
 
 function buildLinuxDesktopSettingsSource({
-  chunkAsset,
-  reactAsset,
-  reactExportName = "t",
-  jsxRuntimeAsset,
-  jsxRuntimeExportName = "t",
+  runtimeBridgeAsset,
   vscodeApiAsset,
   vscodeApiExportName = "n",
   settingsRowAsset,
@@ -175,11 +172,7 @@ function buildLinuxDesktopSettingsSource({
   toggleAsset,
   toggleExportName = "t",
 }) {
-  const reactImport = reactAsset === jsxRuntimeAsset
-    ? `import{${reactExportName} as __reactFactory,${jsxRuntimeExportName} as __jsxFactory}from"./${jsxRuntimeAsset}";`
-    : `import{${reactExportName} as __reactFactory}from"./${reactAsset}";import{${jsxRuntimeExportName} as __jsxFactory}from"./${jsxRuntimeAsset}";`;
-
-  return `import{s as __toESM}from"./${chunkAsset}";${reactImport}import{${vscodeApiExportName} as __post}from"./${vscodeApiAsset}";import{${settingsRowExportName} as SettingsRow}from"./${settingsRowAsset}";import{${settingsSectionExportName} as SettingsSection}from"./${settingsSectionAsset}";import{${settingsGroupExportName} as SettingsGroup}from"./${settingsGroupAsset}";import{${settingsPageExportName} as SettingsPage}from"./${settingsPageAsset}";import{${toggleExportName} as Toggle}from"./${toggleAsset}";var React=__toESM(__reactFactory(),1),$=__jsxFactory(),KEYS={promptWindow:${JSON.stringify(linuxSettingsKeys.promptWindow)},systemTray:${JSON.stringify(linuxSettingsKeys.systemTray)},warmStart:${JSON.stringify(linuxSettingsKeys.warmStart)},autoUpdateOnExit:${JSON.stringify(linuxSettingsKeys.autoUpdateOnExit)}};${linuxDesktopSettingsControlsSource()}${linuxBuildInfoPanelSource()}function LinuxDesktopSettings(){return $.jsx(SettingsPage,{title:"Linux desktop",subtitle:"Launcher, tray, prompt window, and update behavior.",children:$.jsxs("div",{className:"flex flex-col gap-6",children:[$.jsxs(SettingsSection,{className:"gap-2",children:[$.jsx(SettingsSection.Header,{title:"Global shortcuts"}),$.jsx(SettingsSection.Content,{children:$.jsx(SettingsGroup,{children:$.jsx(LinuxToggle,{settingKey:KEYS.promptWindow,label:"Compact prompt window",description:"Allow --prompt-chat and --hotkey-window to open the compact prompt window and keep it prewarmed."})})})]}),$.jsxs(SettingsSection,{className:"gap-2",children:[$.jsx(SettingsSection.Header,{title:"Desktop integration"}),$.jsx(SettingsSection.Content,{children:$.jsxs(SettingsGroup,{children:[$.jsx(LinuxToggle,{settingKey:KEYS.systemTray,label:"System tray",description:"Show the ChatGPT system tray icon and keep the app available from the tray."}),$.jsx(LinuxToggle,{settingKey:KEYS.warmStart,label:"Warm start",description:"Use the running app for launch actions instead of starting a fresh Electron instance."})]})})]}),$.jsxs(SettingsSection,{className:"gap-2",children:[$.jsx(SettingsSection.Header,{title:"Updates"}),$.jsx(SettingsSection.Content,{children:$.jsx(SettingsGroup,{children:$.jsx(LinuxToggle,{settingKey:KEYS.autoUpdateOnExit,label:"Install updates when you close ChatGPT",description:"When on, a ready update waits for ChatGPT to close and then installs. When off, updates wait until you click Update."})})})]}),$.jsxs(SettingsSection,{className:"gap-2",children:[$.jsx(SettingsSection.Header,{title:"Build"}),$.jsx(SettingsSection.Content,{children:$.jsx(SettingsGroup,{children:$.jsx(LinuxBuildInfoPanel,{})})})]})]})})}export{LinuxDesktopSettings,LinuxDesktopSettings as default};\n//# sourceMappingURL=${linuxDesktopSettingsAsset}.map\n`;
+  return `import{${linuxReactRuntimeExport} as React,${linuxJsxRuntimeExport} as $}from"./${runtimeBridgeAsset}";import{${vscodeApiExportName} as __post}from"./${vscodeApiAsset}";import{${settingsRowExportName} as SettingsRow}from"./${settingsRowAsset}";import{${settingsSectionExportName} as SettingsSection}from"./${settingsSectionAsset}";import{${settingsGroupExportName} as SettingsGroup}from"./${settingsGroupAsset}";import{${settingsPageExportName} as SettingsPage}from"./${settingsPageAsset}";import{${toggleExportName} as Toggle}from"./${toggleAsset}";var KEYS={promptWindow:${JSON.stringify(linuxSettingsKeys.promptWindow)},systemTray:${JSON.stringify(linuxSettingsKeys.systemTray)},warmStart:${JSON.stringify(linuxSettingsKeys.warmStart)},autoUpdateOnExit:${JSON.stringify(linuxSettingsKeys.autoUpdateOnExit)}};${linuxDesktopSettingsControlsSource()}${linuxBuildInfoPanelSource()}function LinuxDesktopSettings(){return $.jsx(SettingsPage,{title:"Linux desktop",subtitle:"Launcher, tray, prompt window, and update behavior.",children:$.jsxs("div",{className:"flex flex-col gap-6",children:[$.jsxs(SettingsSection,{className:"gap-2",children:[$.jsx(SettingsSection.Header,{title:"Global shortcuts"}),$.jsx(SettingsSection.Content,{children:$.jsx(SettingsGroup,{children:$.jsx(LinuxToggle,{settingKey:KEYS.promptWindow,label:"Compact prompt window",description:"Allow --prompt-chat and --hotkey-window to open the compact prompt window and keep it prewarmed."})})})]}),$.jsxs(SettingsSection,{className:"gap-2",children:[$.jsx(SettingsSection.Header,{title:"Desktop integration"}),$.jsx(SettingsSection.Content,{children:$.jsxs(SettingsGroup,{children:[$.jsx(LinuxToggle,{settingKey:KEYS.systemTray,label:"System tray",description:"Show the ChatGPT system tray icon and keep the app available from the tray."}),$.jsx(LinuxToggle,{settingKey:KEYS.warmStart,label:"Warm start",description:"Use the running app for launch actions instead of starting a fresh Electron instance."})]})})]}),$.jsxs(SettingsSection,{className:"gap-2",children:[$.jsx(SettingsSection.Header,{title:"Updates"}),$.jsx(SettingsSection.Content,{children:$.jsx(SettingsGroup,{children:$.jsx(LinuxToggle,{settingKey:KEYS.autoUpdateOnExit,label:"Install updates when you close ChatGPT",description:"When on, a ready update waits for ChatGPT to close and then installs. When off, updates wait until you click Update."})})})]}),$.jsxs(SettingsSection,{className:"gap-2",children:[$.jsx(SettingsSection.Header,{title:"Build"}),$.jsx(SettingsSection.Content,{children:$.jsx(SettingsGroup,{children:$.jsx(LinuxBuildInfoPanel,{})})})]})]})})}export{LinuxDesktopSettings,LinuxDesktopSettings as default};\n//# sourceMappingURL=${linuxDesktopSettingsAsset}.map\n`;
 }
 
 function inferSettingsRowExportName(source) {
@@ -272,11 +265,29 @@ function inferRuntimeDependenciesFromSettingsSource(source) {
   }
 
   return {
-    jsxRuntimeAsset: jsxBinding.assetName,
-    jsxRuntimeExportName: jsxBinding.exportName,
-    reactAsset: reactBinding.assetName,
-    reactExportName: reactBinding.exportName,
+    jsxRuntimeLocalName: jsxLocal,
+    reactRuntimeLocalName: reactLocal,
   };
+}
+
+function addLinuxSettingsRuntimeBridgeExports(source, runtimeDependencies) {
+  if (
+    source.includes(` as ${linuxReactRuntimeExport}`)
+    && source.includes(` as ${linuxJsxRuntimeExport}`)
+  ) {
+    return source;
+  }
+
+  const exportPattern = /export\{([^}]*)\}/;
+  const bridgeExports = [
+    `${runtimeDependencies.reactRuntimeLocalName} as ${linuxReactRuntimeExport}`,
+    `${runtimeDependencies.jsxRuntimeLocalName} as ${linuxJsxRuntimeExport}`,
+  ].join(",");
+  if (!exportPattern.test(source)) {
+    return `${source}export{${bridgeExports}};`;
+  }
+
+  return source.replace(exportPattern, (_match, exports) => `export{${exports},${bridgeExports}}`);
 }
 
 function findNativeKeyboardShortcutsSettingsAsset(webviewAssetsDir) {
@@ -284,6 +295,34 @@ function findNativeKeyboardShortcutsSettingsAsset(webviewAssetsDir) {
     .readdirSync(webviewAssetsDir)
     .filter((name) => /^keyboard-shortcuts-settings-.*\.js$/.test(name))
     .sort()[0] ?? null;
+}
+
+function findSettingsRouteRuntimeAsset(webviewAssetsDir) {
+  // The lazy-route wrapper renders every settings page with this module's
+  // React instance. A different initialized chunk can still have a null hook
+  // dispatcher when React calls into it, so bridge the runtime from here.
+  const routeMatches = fs
+    .readdirSync(webviewAssetsDir)
+    .filter((name) => name.endsWith(".js"))
+    .sort()
+    .filter((name) => {
+      const source = fs.readFileSync(path.join(webviewAssetsDir, name), "utf8");
+      return isSettingsRouteBundleSource(source);
+    });
+  if (routeMatches.length === 0) {
+    throw new Error("Required Keybinds settings patch failed: could not find Linux desktop settings route bundle");
+  }
+  const matches = routeMatches.filter((name) => {
+    const source = fs.readFileSync(path.join(webviewAssetsDir, name), "utf8");
+    return inferRuntimeDependenciesFromSettingsSource(source) != null;
+  });
+
+  if (matches.length !== 1) {
+    throw new Error(
+      `Required Keybinds settings patch failed: could not infer the active React runtime from exactly one settings route asset (found ${matches.length})`,
+    );
+  }
+  return matches[0];
 }
 
 function tryFindRequiredWebviewAsset(webviewAssetsDir, namePattern, requiredContent, description) {
@@ -294,8 +333,8 @@ function tryFindRequiredWebviewAsset(webviewAssetsDir, namePattern, requiredCont
   }
 }
 
-function linuxSettingsFallbackComponents({ jsxRuntimeAsset, jsxRuntimeExportName }) {
-  const jsxImport = `import{${jsxRuntimeExportName} as __jsxFactory}from"./${jsxRuntimeAsset}";var $=__jsxFactory();`;
+function linuxSettingsFallbackComponents({ runtimeBridgeAsset }) {
+  const jsxImport = `import{${linuxJsxRuntimeExport} as $}from"./${runtimeBridgeAsset}";`;
 
   return {
     settingsRow: {
@@ -326,150 +365,25 @@ function linuxSettingsFallbackComponents({ jsxRuntimeAsset, jsxRuntimeExportName
   };
 }
 
-function inferToggleExportName(source) {
-  const functionPattern = /function\s+([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{/g;
-  let match;
-  while ((match = functionPattern.exec(source)) != null) {
-    const nextFunctionIndex = source.indexOf("function ", functionPattern.lastIndex);
-    const functionSource = source.slice(
-      match.index,
-      nextFunctionIndex === -1 ? source.length : nextFunctionIndex,
-    );
-    if (
-      !functionSource.includes("checked") ||
-      !functionSource.includes("onChange") ||
-      !(
-        functionSource.includes("ariaLabel") ||
-        functionSource.includes("aria-label") ||
-        functionSource.includes("aria-checked") ||
-        functionSource.includes('role:"switch"') ||
-        functionSource.includes("role:`switch`")
-      )
-    ) {
-      continue;
-    }
-
-    const exportMatch = source.match(/export\{([^}]*)\}/);
-    if (exportMatch == null) {
-      return null;
-    }
-    for (const rawExport of exportMatch[1].split(",")) {
-      const exportPart = rawExport.trim();
-      const aliasedMatch = exportPart.match(
-        new RegExp(`^${escapeRegExp(match[1])}\\s+as\\s+([A-Za-z_$][\\w$]*)$`),
-      );
-      if (aliasedMatch != null) {
-        return aliasedMatch[1];
-      }
-      if (exportPart === match[1]) {
-        return match[1];
-      }
-    }
-  }
-  return null;
-}
-
-function inferToggleDependencyFromSettingsSource(source) {
-  const bindings = importBindings(source);
-  const controlPattern = /control:(?:\(0,[A-Za-z_$][\w$]*\.jsx\)|[A-Za-z_$][\w$]*\.jsx)\(([A-Za-z_$][\w$]*),\{/g;
-  let match;
-  while ((match = controlPattern.exec(source)) != null) {
-    const localName = match[1];
-    const sample = source.slice(match.index, match.index + 1000);
-    if (!sample.includes("checked:") || !sample.includes("onChange:") || !sample.includes("ariaLabel:")) {
-      continue;
-    }
-    const binding = bindings.get(localName);
-    if (binding != null) {
-      return {
-        assetName: binding.assetName,
-        exportName: binding.exportName,
-      };
-    }
-  }
-  return null;
-}
-
-function resolveSettingsToggleDependency(webviewAssetsDir, fallbackComponents, generatedAssets) {
-  const directToggleAssets = fs
-    .readdirSync(webviewAssetsDir)
-    .filter((name) => /^toggle-.*\.js$/.test(name))
-    .sort();
-  for (const directToggleAsset of directToggleAssets) {
-    const source = fs.readFileSync(path.join(webviewAssetsDir, directToggleAsset), "utf8");
-    const exportName = inferToggleExportName(source);
-    if (exportName != null) {
-      return {
-        assetName: directToggleAsset,
-        exportName,
-      };
-    }
-  }
-
-  const settingsAssets = fs
-    .readdirSync(webviewAssetsDir)
-    .filter((name) =>
-      name.endsWith(".js") &&
-        name.includes("settings") &&
-        name !== linuxDesktopSettingsAsset &&
-        name !== keybindsSettingsAsset &&
-        !name.startsWith("linux-settings-")
-    )
-    .sort();
-  for (const assetName of settingsAssets) {
-    const source = fs.readFileSync(path.join(webviewAssetsDir, assetName), "utf8");
-    const dependency = inferToggleDependencyFromSettingsSource(source);
-    if (dependency != null) {
-      return dependency;
-    }
-  }
-
-  const fallback = fallbackComponents.settingsToggle;
-  generatedAssets.push({
-    filePath: path.join(webviewAssetsDir, fallback.assetName),
-    source: fallback.source,
-  });
-  return {
-    assetName: fallback.assetName,
-    exportName: fallback.exportName,
-  };
-}
-
 function resolveSettingsAssetDependencies(extractedDir, { includeHotkeySettings = true } = {}) {
   const webviewAssetsDir = path.join(extractedDir, "webview", "assets");
   if (!fs.existsSync(webviewAssetsDir)) {
     throw new Error(`Required Keybinds settings patch failed: missing webview assets directory ${webviewAssetsDir}`);
   }
 
-  let runtimeDependencies = null;
-  const nativeKeyboardShortcutsAsset = findNativeKeyboardShortcutsSettingsAsset(webviewAssetsDir);
-  if (nativeKeyboardShortcutsAsset != null) {
-    const source = fs.readFileSync(path.join(webviewAssetsDir, nativeKeyboardShortcutsAsset), "utf8");
-    runtimeDependencies = inferRuntimeDependenciesFromSettingsSource(source);
+  const runtimeBridgeAsset = findSettingsRouteRuntimeAsset(webviewAssetsDir);
+  const runtimeBridgeSource = fs.readFileSync(
+    path.join(webviewAssetsDir, runtimeBridgeAsset),
+    "utf8",
+  );
+  const runtimeDependencies = inferRuntimeDependenciesFromSettingsSource(runtimeBridgeSource);
+
+  if (runtimeDependencies == null) {
+    throw new Error(
+      "Required Keybinds settings patch failed: could not infer the active React runtime from the current upstream settings route asset",
+    );
   }
 
-  let jsxRuntimeAsset;
-  let jsxRuntimeExportName;
-  let reactAsset;
-  let reactExportName;
-  if (runtimeDependencies != null) {
-    ({
-      jsxRuntimeAsset,
-      jsxRuntimeExportName,
-      reactAsset,
-      reactExportName,
-    } = runtimeDependencies);
-  } else {
-    jsxRuntimeAsset = findRequiredWebviewAsset(webviewAssetsDir, /^jsx-runtime-.*\.js$/, "react.transitional.element", "JSX runtime asset");
-    const jsxRuntimeSource = fs.readFileSync(path.join(webviewAssetsDir, jsxRuntimeAsset), "utf8");
-    const jsxExportsReactFactory = /export\{[^}]*\bn\b/.test(jsxRuntimeSource);
-    reactAsset = jsxExportsReactFactory
-      ? jsxRuntimeAsset
-      : findRequiredWebviewAsset(webviewAssetsDir, /^react-.*\.js$/, "react.transitional.element", "React asset");
-    reactExportName = jsxExportsReactFactory ? "n" : "t";
-    jsxRuntimeExportName = "t";
-  }
-  const chunkAsset = findImportedAsset(webviewAssetsDir, reactAsset, "React shared chunk asset");
   const { assetName: vscodeApiAsset, exportName: vscodeApiExportName } =
     findCodexRequestWebviewAsset(webviewAssetsDir);
   const hotkeySettingsAsset = includeHotkeySettings
@@ -481,10 +395,16 @@ function resolveSettingsAssetDependencies(extractedDir, { includeHotkeySettings 
       )
     : null;
   const fallbackComponents = linuxSettingsFallbackComponents({
-    jsxRuntimeAsset,
-    jsxRuntimeExportName,
+    runtimeBridgeAsset,
   });
   const generatedAssets = [];
+  generatedAssets.push({
+    filePath: path.join(webviewAssetsDir, runtimeBridgeAsset),
+    source: addLinuxSettingsRuntimeBridgeExports(
+      runtimeBridgeSource,
+      runtimeDependencies,
+    ),
+  });
   const useFallbackComponent = (componentName) => {
     const component = fallbackComponents[componentName];
     generatedAssets.push({
@@ -525,14 +445,15 @@ function resolveSettingsAssetDependencies(extractedDir, { includeHotkeySettings 
     .sort()[0] ?? null;
   const settingsSectionFallback = settingsGroupCandidate == null ? useFallbackComponent("settingsSection") : null;
   const settingsGroupFallback = settingsSurfaceCandidate == null ? useFallbackComponent("settingsGroup") : null;
-  const toggleDependency = resolveSettingsToggleDependency(webviewAssetsDir, fallbackComponents, generatedAssets);
+  // Upstream settings controls are often exported from lazy Rolldown modules
+  // whose private initializer is only invoked by their original consumer.
+  // Importing those controls directly can therefore succeed while rendering
+  // crashes inside an uninitialized React compiler runtime. Keep this small
+  // control self-contained instead of depending on upstream module internals.
+  const toggleDependency = useFallbackComponent("settingsToggle");
 
   return {
-    chunkAsset,
-    reactAsset,
-    reactExportName,
-    jsxRuntimeAsset,
-    jsxRuntimeExportName,
+    runtimeBridgeAsset,
     vscodeApiAsset,
     vscodeApiExportName,
     hotkeySettingsAsset,
@@ -547,17 +468,6 @@ function resolveSettingsAssetDependencies(extractedDir, { includeHotkeySettings 
     toggleAsset: toggleDependency.assetName,
     toggleExportName: toggleDependency.exportName,
     generatedAssets,
-  };
-}
-
-function resolveKeybindsSettingsAsset(extractedDir) {
-  const webviewAssetsDir = path.join(extractedDir, "webview", "assets");
-  const dependencies = resolveSettingsAssetDependencies(extractedDir);
-
-  return {
-    filePath: path.join(webviewAssetsDir, keybindsSettingsAsset),
-    source: buildKeybindsSettingsSource(dependencies),
-    generatedAssets: dependencies.generatedAssets,
   };
 }
 
@@ -794,7 +704,20 @@ function patchKeybindsSettingsAssets(extractedDir) {
     const previousSettingsSource = settingsAssetExists
       ? fs.readFileSync(settingsAsset.filePath, "utf8")
       : null;
+    // Treat generated updates as patches so a route bundle can receive both
+    // the runtime exports and the Linux route insertion without one write
+    // overwriting the other.
+    const generatedPatches = (settingsAsset.generatedAssets ?? []).map((generatedAsset) => {
+      const exists = fs.existsSync(generatedAsset.filePath);
+      const currentSource = exists ? fs.readFileSync(generatedAsset.filePath, "utf8") : "";
+      return {
+        filePath: generatedAsset.filePath,
+        currentSource,
+        patchedSource: generatedAsset.source,
+      };
+    });
     const patches = [
+      ...generatedPatches,
       ...collectOptionalMatchingAssetPatches(
         extractedDir,
         isSettingsSectionsMetadataBundleSource,
@@ -805,23 +728,21 @@ function patchKeybindsSettingsAssets(extractedDir) {
         isSettingsSharedMetadataBundleSource,
         applyLinuxDesktopSettingsSharedPatch,
       ),
+      ...collectOptionalMatchingAssetPatches(
+        extractedDir,
+        isLinuxShortcutPhysicalKeyFallbackBundleSource,
+        applyLinuxShortcutPhysicalKeyFallbackPatch,
+      ),
       ...collectLinuxDesktopRouteAndNavigationPatches(extractedDir),
     ];
 
-    const generatedWrites = (settingsAsset.generatedAssets ?? []).filter((generatedAsset) =>
-      !fs.existsSync(generatedAsset.filePath) ||
-        fs.readFileSync(generatedAsset.filePath, "utf8") !== generatedAsset.source
-    );
-    for (const generatedAsset of generatedWrites) {
-      fs.writeFileSync(generatedAsset.filePath, generatedAsset.source, "utf8");
-    }
     fs.writeFileSync(settingsAsset.filePath, settingsAsset.source, "utf8");
-    let changed = generatedWrites.length + (previousSettingsSource !== settingsAsset.source ? 1 : 0);
+    let changed = previousSettingsSource !== settingsAsset.source ? 1 : 0;
     changed += applyCollectedAssetPatchWrites(patches);
     return {
       matched: true,
       changed,
-      reason: "upstream keyboard shortcuts settings are present; added Linux desktop settings",
+      reason: "upstream keyboard shortcuts settings are present; added Linux desktop settings and shortcut layout fallback",
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -971,8 +892,44 @@ function applyLinuxDesktopSettingsSharedPatch(currentSource) {
   return patchedSource;
 }
 
+function applyLinuxShortcutPhysicalKeyFallbackPatch(currentSource) {
+  const patchMarker = "codexLinuxShortcutPhysicalKeyFallbackEvent";
+  if (currentSource.includes(patchMarker)) {
+    return currentSource;
+  }
+
+  const physicalKeyResolverPattern =
+    /function ([A-Za-z_$][\w$]*)\(\{altKey:([A-Za-z_$][\w$]*),code:([A-Za-z_$][\w$]*),key:([A-Za-z_$][\w$]*)\}\)\{return!\2\|\|\3==null\?\4:([^{};]+)\}/;
+  const match = currentSource.match(physicalKeyResolverPattern);
+  if (match == null) {
+    return currentSource;
+  }
+
+  const [
+    matchedSource,
+    functionName,
+    altKeyLocal,
+    codeLocal,
+    keyLocal,
+    physicalFallbackExpression,
+  ] = match;
+  const patchedSource =
+    `function ${functionName}(codexLinuxShortcutPhysicalKeyFallbackEvent){let{altKey:${altKeyLocal},code:${codeLocal},key:${keyLocal},ctrlKey:codexLinuxShortcutPhysicalKeyFallbackCtrl,metaKey:codexLinuxShortcutPhysicalKeyFallbackMeta}=codexLinuxShortcutPhysicalKeyFallbackEvent;return!(${altKeyLocal}||codexLinuxShortcutPhysicalKeyFallbackCtrl||codexLinuxShortcutPhysicalKeyFallbackMeta)||typeof codexLinuxShortcutPhysicalKeyFallbackEvent.getModifierState=="function"&&codexLinuxShortcutPhysicalKeyFallbackEvent.getModifierState("AltGraph")||${codeLocal}==null?${keyLocal}:${physicalFallbackExpression}}`;
+
+  return currentSource.replace(matchedSource, patchedSource);
+}
+
+function isLinuxShortcutPhysicalKeyFallbackBundleSource(currentSource) {
+  return currentSource.includes("altKey:")
+    && currentSource.includes("code:")
+    && currentSource.includes("key:")
+    && currentSource.includes("Key[A-Z]")
+    && currentSource.includes("Digit[0-9]")
+    && /function [A-Za-z_$][\w$]*\(\{altKey:[A-Za-z_$][\w$]*,code:[A-Za-z_$][\w$]*,key:[A-Za-z_$][\w$]*\}\)\{return![A-Za-z_$][\w$]*\|\|[A-Za-z_$][\w$]*==null\?[A-Za-z_$][\w$]*:/.test(currentSource);
+}
+
 function applyLinuxKeybindOverridesRuntimePatch(currentSource) {
-  const runtimePatch = `;function codexLinuxKeybindOverridesRuntime(){try{if(typeof window=="undefined")return;let storageKey=${JSON.stringify(linuxKeybindOverridesKey)},defaultMap=typeof Ct=="object"&&Ct?Ct:{},overrides={};function loadOverrides(){try{let value=JSON.parse(localStorage.getItem(storageKey)||"{}");overrides=value&&typeof value=="object"&&!Array.isArray(value)?value:{}}catch{overrides={}}}function isShortcutCaptureTarget(event){let target=event.target;return target instanceof Element&&target.closest("[data-codex-keybind-input]")!=null}function normalizeKeyName(key){let map={Space:" ",Esc:"Escape",Up:"ArrowUp",Down:"ArrowDown",Left:"ArrowLeft",Right:"ArrowRight",Plus:"+",Comma:",",Period:".",Slash:"/"};return map[key]??(/^.$/.test(key)?key.toUpperCase():key)}function parseAccelerator(accelerator){if(typeof accelerator!="string"||accelerator.trim().length===0)return null;let isMac=/Mac/.test(navigator.platform||""),parts=accelerator.split("+").map(part=>part.trim()).filter(Boolean),parsed={ctrl:false,alt:false,shift:false,meta:false,key:null};for(let part of parts){switch(part){case"CmdOrCtrl":isMac?parsed.meta=true:parsed.ctrl=true;break;case"Command":case"Cmd":case"Meta":case"Super":case"Win":parsed.meta=true;break;case"Control":case"Ctrl":parsed.ctrl=true;break;case"Alt":case"Option":parsed.alt=true;break;case"Shift":parsed.shift=true;break;default:parsed.key=normalizeKeyName(part);break}}return parsed.key?parsed:null}function matches(event,parsed){return event.ctrlKey===parsed.ctrl&&event.altKey===parsed.alt&&event.shiftKey===parsed.shift&&event.metaKey===parsed.meta&&normalizeKeyName(event.key)===parsed.key}function dispatchHost(message){if(typeof E=="object"&&E&&typeof E.dispatchHostMessage=="function"){E.dispatchHostMessage(message);return true}return false}function dispatchElectron(type,params={}){if(typeof E=="object"&&E&&typeof E.dispatchMessage=="function"){E.dispatchMessage(type,params);return true}return false}let hostActionTypes={newThread:"new-chat",quickChat:"new-quick-chat",newThreadAlt:"new-chat",toggleSidebar:"toggle-sidebar",toggleTerminal:"toggle-terminal",toggleBrowserPanel:"toggle-browser-panel",toggleDiffPanel:"toggle-diff-panel",findInThread:"find-in-thread",navigateBack:"navigate-back",navigateForward:"navigate-forward",previousThread:"previous-thread",nextThread:"next-thread",copyConversationPath:"copy-conversation-path",toggleThreadPin:"toggle-thread-pin",renameThread:"rename-thread",archiveThread:"archive-thread",copyWorkingDirectory:"copy-working-directory",copySessionId:"copy-session-id",copyDeeplink:"copy-deeplink",toggleFileTreePanel:"toggle-file-tree-panel"};function runAction(id){if(/^thread[1-9]$/.test(id))return dispatchHost({type:"go-to-thread-index",index:Number(id.slice(6))-1});switch(id){case"openCommandMenu":case"openCommandMenuAlt":return dispatchHost({type:"command-menu",query:""});case"searchChats":return dispatchHost({type:"chat-search-command-menu"});case"searchFiles":return dispatchHost({type:"file-search-command-menu"});case"openFolder":return dispatchElectron("electron-create-new-workspace-root-option",{});case"settings":return dispatchElectron("show-settings",{section:"general-settings"});case"openBrowserTab":return dispatchHost({type:"browser-sidebar-command",command:{type:"new-tab"}});case"reloadBrowserPage":return dispatchHost({type:"browser-sidebar-command",command:{type:"reload"}});case"hardReloadBrowserPage":return dispatchHost({type:"browser-sidebar-command",command:{type:"hard-reload"}});case"dictation":return dispatchElectron("global-dictation-start",{});default:return hostActionTypes[id]?dispatchHost({type:hostActionTypes[id]}):false}}loadOverrides();window.addEventListener("storage",event=>{event.key===storageKey&&loadOverrides()});window.addEventListener("codex-linux-keybind-overrides-changed",loadOverrides);window.addEventListener("keydown",event=>{if(event.defaultPrevented||event.repeat||isShortcutCaptureTarget(event))return;for(let[id,accelerator]of Object.entries(overrides)){if(typeof accelerator!="string"||accelerator.trim().length===0||accelerator.trim()===(defaultMap[id]||""))continue;let parsed=parseAccelerator(accelerator);if(parsed&&matches(event,parsed)&&runAction(id)){event.preventDefault();event.stopPropagation();break}}},true)}catch{}}codexLinuxKeybindOverridesRuntime();`;
+  const runtimePatch = `;function codexLinuxKeybindOverridesRuntime(){try{if(typeof window=="undefined")return;let storageKey=${JSON.stringify(linuxKeybindOverridesKey)},defaultMap=typeof Ct=="object"&&Ct?Ct:{},overrides={};function loadOverrides(){try{let value=JSON.parse(localStorage.getItem(storageKey)||"{}");overrides=value&&typeof value=="object"&&!Array.isArray(value)?value:{}}catch{overrides={}}}function isShortcutCaptureTarget(event){let target=event.target;return target instanceof Element&&target.closest("[data-codex-keybind-input]")!=null}function normalizeKeyName(key){let map={Space:" ",Esc:"Escape",Up:"ArrowUp",Down:"ArrowDown",Left:"ArrowLeft",Right:"ArrowRight",Plus:"+",Comma:",",Period:".",Slash:"/"};return map[key]??(/^.$/.test(key)?key.toUpperCase():key)}function keyNameFromCode(code){if(typeof code!="string")return null;if(/^Key[A-Z]$/.test(code))return code.slice(3);if(/^Digit[0-9]$/.test(code))return code.slice(5);let map={Backquote:"\`",Minus:"-",Equal:"=",BracketLeft:"[",BracketRight:"]",Backslash:"\\\\",Semicolon:";",Quote:"'",Comma:",",Period:".",Slash:"/",IntlBackslash:"\\\\"};return map[code]??null}function parseAccelerator(accelerator){if(typeof accelerator!="string"||accelerator.trim().length===0)return null;let isMac=/Mac/.test(navigator.platform||""),parts=accelerator.split("+").map(part=>part.trim()).filter(Boolean),parsed={ctrl:false,alt:false,shift:false,meta:false,key:null};for(let part of parts){switch(part){case"CmdOrCtrl":isMac?parsed.meta=true:parsed.ctrl=true;break;case"Command":case"Cmd":case"Meta":case"Super":case"Win":parsed.meta=true;break;case"Control":case"Ctrl":parsed.ctrl=true;break;case"Alt":case"Option":parsed.alt=true;break;case"Shift":parsed.shift=true;break;default:parsed.key=normalizeKeyName(part);break}}return parsed.key?parsed:null}function matchKind(event,parsed){if(event.ctrlKey!==parsed.ctrl||event.altKey!==parsed.alt||event.shiftKey!==parsed.shift||event.metaKey!==parsed.meta)return null;if(normalizeKeyName(event.key)===parsed.key)return"logical";if(!(parsed.ctrl||parsed.alt||parsed.meta)||typeof event.getModifierState=="function"&&event.getModifierState("AltGraph"))return null;let codeKey=keyNameFromCode(event.code);return codeKey!=null&&normalizeKeyName(codeKey)===parsed.key?"physical":null}function dispatchHost(message){if(typeof E=="object"&&E&&typeof E.dispatchHostMessage=="function"){E.dispatchHostMessage(message);return true}return false}function dispatchElectron(type,params={}){if(typeof E=="object"&&E&&typeof E.dispatchMessage=="function"){E.dispatchMessage(type,params);return true}return false}let hostActionTypes={newThread:"new-chat",quickChat:"new-quick-chat",newThreadAlt:"new-chat",toggleSidebar:"toggle-sidebar",toggleTerminal:"toggle-terminal",toggleBrowserPanel:"toggle-browser-panel",toggleDiffPanel:"toggle-diff-panel",findInThread:"find-in-thread",navigateBack:"navigate-back",navigateForward:"navigate-forward",previousThread:"previous-thread",nextThread:"next-thread",copyConversationPath:"copy-conversation-path",toggleThreadPin:"toggle-thread-pin",renameThread:"rename-thread",archiveThread:"archive-thread",copyWorkingDirectory:"copy-working-directory",copySessionId:"copy-session-id",copyDeeplink:"copy-deeplink",toggleFileTreePanel:"toggle-file-tree-panel"};function runAction(id){if(/^thread[1-9]$/.test(id))return dispatchHost({type:"go-to-thread-index",index:Number(id.slice(6))-1});switch(id){case"openCommandMenu":case"openCommandMenuAlt":return dispatchHost({type:"command-menu",query:""});case"searchChats":return dispatchHost({type:"chat-search-command-menu"});case"searchFiles":return dispatchHost({type:"file-search-command-menu"});case"openFolder":return dispatchElectron("electron-create-new-workspace-root-option",{});case"settings":return dispatchElectron("show-settings",{section:"general-settings"});case"openBrowserTab":return dispatchHost({type:"browser-sidebar-command",command:{type:"new-tab"}});case"reloadBrowserPage":return dispatchHost({type:"browser-sidebar-command",command:{type:"reload"}});case"hardReloadBrowserPage":return dispatchHost({type:"browser-sidebar-command",command:{type:"hard-reload"}});case"dictation":return dispatchElectron("global-dictation-start",{});default:return hostActionTypes[id]?dispatchHost({type:hostActionTypes[id]}):false}}loadOverrides();window.addEventListener("storage",event=>{event.key===storageKey&&loadOverrides()});window.addEventListener("codex-linux-keybind-overrides-changed",loadOverrides);window.addEventListener("keydown",event=>{if(event.defaultPrevented||event.repeat||isShortcutCaptureTarget(event))return;let accelerators={...defaultMap,...overrides};for(let[id,accelerator]of Object.entries(accelerators)){if(typeof accelerator!="string"||accelerator.trim().length===0)continue;let isDefault=accelerator.trim()===(defaultMap[id]||""),parsed=parseAccelerator(accelerator),kind=parsed?matchKind(event,parsed):null;if(kind&&(kind==="physical"||!isDefault)&&runAction(id)){event.preventDefault();event.stopPropagation();break}}},true)}catch{}}codexLinuxKeybindOverridesRuntime();`;
 
   const runtimeMarker = ";function codexLinuxKeybindOverridesRuntime()";
   const existingRuntimeIndex = currentSource.indexOf(runtimeMarker);
@@ -1192,10 +1149,10 @@ module.exports = {
   applyLinuxDesktopSettingsSectionsPatch,
   applyLinuxDesktopSettingsSharedPatch,
   applyLinuxKeybindOverridesRuntimePatch,
+  applyLinuxShortcutPhysicalKeyFallbackPatch,
   keybindsSettingsAsset,
   linuxDesktopSettingsAsset,
   linuxKeybindOverridesKey,
   patchKeybindsSettingsAssets,
   resolveLinuxDesktopSettingsAsset,
-  resolveKeybindsSettingsAsset,
 };

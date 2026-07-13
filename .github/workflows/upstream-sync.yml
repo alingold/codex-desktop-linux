@@ -8,7 +8,6 @@ on:
 permissions:
   actions: write
   contents: write
-  issues: write
   pull-requests: write
 
 concurrency:
@@ -20,7 +19,6 @@ env:
   UPSTREAM_BRANCH: main
   BASE_BRANCH: main
   SYNC_BRANCH: automation/upstream-sync
-  CONFLICT_ISSUE_TITLE: Weekly upstream sync needs conflict resolution
 
 jobs:
   prepare-sync:
@@ -49,12 +47,9 @@ jobs:
             "+refs/heads/${UPSTREAM_BRANCH}:refs/remotes/upstream/${UPSTREAM_BRANCH}"
           git fetch --no-tags origin \
             "+refs/heads/${BASE_BRANCH}:refs/remotes/origin/${BASE_BRANCH}"
-          git fetch --no-tags origin \
-            "+refs/heads/${SYNC_BRANCH}:refs/remotes/origin/${SYNC_BRANCH}" || true
 
           base_ref="refs/remotes/origin/${BASE_BRANCH}"
           upstream_ref="refs/remotes/upstream/${UPSTREAM_BRANCH}"
-          sync_ref="refs/remotes/origin/${SYNC_BRANCH}"
 
           if git merge-base --is-ancestor "$upstream_ref" "$base_ref"; then
             echo "result=up-to-date" >> "$GITHUB_OUTPUT"
@@ -62,12 +57,23 @@ jobs:
             exit 0
           fi
 
-          if git show-ref --verify --quiet "$sync_ref" \
-            && git merge-base --is-ancestor "$base_ref" "$sync_ref" \
-            && git merge-base --is-ancestor "$upstream_ref" "$sync_ref"; then
-            echo "result=pending-review" >> "$GITHUB_OUTPUT"
-            echo "The existing sync pull request already covers the current base and upstream heads." >> "$GITHUB_STEP_SUMMARY"
-            exit 0
+          open_pr_count="$(gh pr list \
+            --repo "$GITHUB_REPOSITORY" \
+            --base "$BASE_BRANCH" \
+            --head "$SYNC_BRANCH" \
+            --state open \
+            --json number \
+            --jq 'length')"
+          if [ "$open_pr_count" -gt 0 ]; then
+            git fetch --no-tags origin \
+              "+refs/heads/${SYNC_BRANCH}:refs/remotes/origin/${SYNC_BRANCH}"
+            sync_ref="refs/remotes/origin/${SYNC_BRANCH}"
+            if git merge-base --is-ancestor "$base_ref" "$sync_ref" \
+              && git merge-base --is-ancestor "$upstream_ref" "$sync_ref"; then
+                echo "result=pending-review" >> "$GITHUB_OUTPUT"
+                echo "The open sync pull request already covers the current base and upstream heads." >> "$GITHUB_STEP_SUMMARY"
+                exit 0
+            fi
           fi
 
           git checkout -B "$SYNC_BRANCH" "$base_ref"
@@ -84,48 +90,23 @@ jobs:
           echo "result=updated" >> "$GITHUB_OUTPUT"
           echo "head_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Open or update conflict issue
+      - name: Report merge conflicts
         if: steps.sync.outputs.result == 'conflict'
         env:
-          GH_TOKEN: ${{ github.token }}
           CONFLICT_FILE: ${{ steps.sync.outputs.conflict_file }}
         run: |
-          set -euo pipefail
-
-          body_file="$RUNNER_TEMP/upstream-sync-conflict.md"
           {
+            echo "## Weekly upstream sync needs conflict resolution"
+            echo
             echo "The scheduled merge of \`${UPSTREAM_REPOSITORY}:${UPSTREAM_BRANCH}\` into \`${BASE_BRANCH}\` has conflicts."
             echo
-            echo "Conflicting paths:"
             echo '```text'
             cat "$CONFLICT_FILE"
             echo '```'
             echo
             echo "Resolve this in a trusted local checkout; automation did not push a partial merge."
-            echo
-            echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          } > "$body_file"
-
-          issue_number="$(gh issue list \
-            --repo "$GITHUB_REPOSITORY" \
-            --state open \
-            --json number,title \
-            --jq ".[] | select(.title == \"${CONFLICT_ISSUE_TITLE}\") | .number" \
-            | head -n 1)"
-          if [ -n "$issue_number" ]; then
-            gh issue edit "$issue_number" --repo "$GITHUB_REPOSITORY" --body-file "$body_file"
-          else
-            gh issue create \
-              --repo "$GITHUB_REPOSITORY" \
-              --title "$CONFLICT_ISSUE_TITLE" \
-              --body-file "$body_file"
-          fi
-
-          cat "$body_file" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Fail visibly after reporting conflicts
-        if: steps.sync.outputs.result == 'conflict'
-        run: exit 1
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
 
       - name: Open or update the review pull request
         if: steps.sync.outputs.result == 'updated'
@@ -186,21 +167,3 @@ jobs:
           set -euo pipefail
           gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$SYNC_BRANCH"
           gh workflow run upstream-build-app.yml --repo "$GITHUB_REPOSITORY" --ref "$SYNC_BRANCH"
-
-      - name: Close a resolved conflict issue
-        if: steps.sync.outputs.result == 'updated'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          gh issue list \
-            --repo "$GITHUB_REPOSITORY" \
-            --state open \
-            --json number,title \
-            --jq ".[] | select(.title == \"${CONFLICT_ISSUE_TITLE}\") | .number" \
-            | while read -r issue_number; do
-                [ -n "$issue_number" ] || continue
-                gh issue close "$issue_number" \
-                  --repo "$GITHUB_REPOSITORY" \
-                  --comment "The automation branch now merges cleanly; closing this conflict report."
-              done

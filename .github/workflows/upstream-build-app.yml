@@ -2,7 +2,7 @@ name: Upstream Build App
 
 on:
   schedule:
-    - cron: '30 6 * * *'
+    - cron: '30 * * * *'
   pull_request:
     paths:
       - install.sh
@@ -10,8 +10,13 @@ on:
       - scripts/patch-linux-window-ui.js
       - scripts/patch-linux-window-ui.test.js
       - scripts/patches/**
-      - linux-features/remote-mobile-control/**
       - scripts/ci/validate-patch-report.js
+      - scripts/ci/upstream-dmg-*.js
+      - scripts/validate-upstream-dmg.js
+      - scripts/lib/candidate-install.sh
+      - scripts/lib/patch-validation.js
+      - scripts/lib/upstream-dmg-acceptance.js
+      - scripts/lib/upstream-dmg-release-profile.js
       - .github/workflows/upstream-build-app.yml
   push:
     branches:
@@ -22,13 +27,22 @@ on:
       - scripts/patch-linux-window-ui.js
       - scripts/patch-linux-window-ui.test.js
       - scripts/patches/**
-      - linux-features/remote-mobile-control/**
       - scripts/ci/validate-patch-report.js
+      - scripts/ci/upstream-dmg-*.js
+      - scripts/validate-upstream-dmg.js
+      - scripts/lib/candidate-install.sh
+      - scripts/lib/patch-validation.js
+      - scripts/lib/upstream-dmg-acceptance.js
+      - scripts/lib/upstream-dmg-release-profile.js
       - .github/workflows/upstream-build-app.yml
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: upstream-dmg-acceptance-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -137,62 +151,44 @@ jobs:
           JSON
 
       - name: Build app from upstream DMG
-        run: CODEX_PATCH_REPORT_JSON="$GITHUB_WORKSPACE/patch-report.json" make build-app DMG=/tmp/codex-upstream-ci/Codex.dmg
-
-      - name: Validate required upstream patches
-        run: node scripts/ci/validate-patch-report.js patch-report.json --profile upstream-build
-
-      - name: Inspect upstream DMG with remote mobile control enabled
-        run: |
-          set -euo pipefail
-
-          features_config="$(mktemp)"
-          report_dir="$GITHUB_WORKSPACE/remote-mobile-upstream-inspect"
-          trap 'rm -f "$features_config"' EXIT
-
-          printf '%s\n' '{"enabled":["remote-mobile-control"]}' > "$features_config"
-
-          CODEX_LINUX_FEATURES_CONFIG="$features_config" \
-            make inspect-upstream DMG="$UPSTREAM_DMG_PATH" REBUILD_REPORT_DIR="$report_dir"
-
-          node scripts/ci/validate-patch-report.js "$report_dir/patch-report.json" \
-            --profile upstream-build \
-            --require-enabled-feature remote-mobile-control \
-            --require-applied linux-app-server-conversation-hydration \
-            --require-applied linux-completed-item-recovery \
-            --require-applied feature:remote-mobile-control:linux-remote-control-load-gate \
-            --require-success feature:remote-mobile-control:linux-remote-mobile-conversation-hydration \
-            --require-applied feature:remote-mobile-control:linux-remote-control-status-read-guard \
-            --require-applied feature:remote-mobile-control:linux-remote-control-status-wait
+        id: acceptance-build
+        continue-on-error: true
+        env:
+          CODEX_ACCEPTANCE_DECISION_JSON: ${{ github.workspace }}/upstream-dmg-decision.json
+          CODEX_ACCEPTANCE_OVERRIDE: '0'
+          CODEX_ACCEPTANCE_SOURCE: github-actions
+          CODEX_UPSTREAM_DMG_METADATA_JSON: ${{ github.workspace }}/upstream-dmg-metadata.json
+          REBUILD_REPORT_DIR: ${{ github.workspace }}/upstream-acceptance
+        run: make build-app DMG=/tmp/codex-upstream-ci/Codex.dmg
 
       - name: Upload upstream DMG metadata artifact
-        # The build step now aborts on critical patch failures; keep uploading
-        # the patch report so the failure is diagnosable from the artifact.
+        # The transactional installer records a decision before returning a
+        # rejected status, so diagnostics remain available on failed runs.
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: upstream-dmg-metadata
           path: |
             upstream-dmg-metadata.json
-            patch-report.json
-            remote-mobile-upstream-inspect/*.json
+            upstream-dmg-decision.json
+            upstream-acceptance/**/*.json
           if-no-files-found: ignore
 
-      - name: Write build summary
+      - name: Record missing decision in the summary
+        if: always()
         run: |
-          {
-            echo "## Upstream Build App"
-            echo ""
-            echo "- DMG URL: \`$UPSTREAM_DMG_URL\`"
-            echo "- DMG Last-Modified: \`${{ steps.upstream-metadata.outputs.last_modified }}\`"
-            echo "- DMG ETag: \`${{ steps.upstream-metadata.outputs.etag }}\`"
-            echo "- DMG Content-Length: \`${{ steps.upstream-metadata.outputs.content_length }}\`"
-            echo "- DMG SHA-256: \`${{ steps.local-dmg.outputs.sha256 }}\`"
-            echo "- DMG Size (bytes): \`${{ steps.local-dmg.outputs.size_bytes }}\`"
-            echo "- Tested At (UTC): \`${{ steps.local-dmg.outputs.tested_at_utc }}\`"
-            echo "- Cache Hit: \`${{ steps.dmg-cache.outputs.cache-hit || 'false' }}\`"
-            echo "- Build command: \`make build-app DMG=/tmp/codex-upstream-ci/Codex.dmg\`"
-            echo "- Patch report: \`patch-report.json\`"
-            echo "- Remote mobile inspect: \`make inspect-upstream DMG=$UPSTREAM_DMG_PATH\` with \`remote-mobile-control\` enabled"
-            echo "- Remote mobile patch report: \`remote-mobile-upstream-inspect/patch-report.json\`"
-          } >> "$GITHUB_STEP_SUMMARY"
+          if [ ! -f upstream-dmg-decision.json ]; then
+            echo "## Upstream DMG acceptance" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "No decision artifact was produced; the run is inconclusive." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Enforce shared acceptance decision
+        if: always()
+        run: |
+          test -f upstream-dmg-decision.json
+          verdict="$(node -e 'console.log(require("./upstream-dmg-decision.json").verdict)')"
+          case "$verdict" in
+            accepted|accepted_with_warnings) exit 0 ;;
+            *) echo "Upstream DMG verdict: $verdict" >&2; exit 1 ;;
+          esac

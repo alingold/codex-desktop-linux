@@ -314,6 +314,8 @@ pub struct RuntimeManager {
     cleanup_join: Mutex<Option<thread::JoinHandle<()>>>,
     cleanup_timing: ProcessCleanupTiming,
     extension_id: Option<String>,
+    #[cfg(test)]
+    current_executable_identity_override: Option<FileIdentity>,
     lifecycle: Mutex<()>,
     manifest_paths_override: Option<Vec<PathBuf>>,
     next_process_instance: AtomicU64,
@@ -352,6 +354,8 @@ impl RuntimeManager {
             cleanup_join: Mutex::new(None),
             cleanup_timing,
             extension_id,
+            #[cfg(test)]
+            current_executable_identity_override: None,
             lifecycle: Mutex::new(()),
             manifest_paths_override,
             next_process_instance: AtomicU64::new(1),
@@ -414,8 +418,13 @@ impl RuntimeManager {
         })?)?;
         self.validate_invocation(&constraints)?;
         let client_id = normalized_client_id(params.get("clientId"))?;
-        let entry = select_runtime_entry(&constraints, self.manifest_paths_override.as_deref())?;
-        validate_runtime_entry(&entry)?;
+        let current_executable_identity = self.current_executable_identity()?;
+        let mut entry = select_runtime_entry_for_host(
+            &constraints,
+            self.manifest_paths_override.as_deref(),
+            &current_executable_identity,
+        )?;
+        validate_runtime_entry_for_host(&mut entry, &current_executable_identity)?;
         let _lifecycle = self
             .lifecycle
             .lock()
@@ -1035,6 +1044,30 @@ impl RuntimeManager {
     }
 
     #[cfg(test)]
+    pub(crate) fn for_test_with_current_executable_path(
+        extension_id: String,
+        runtime_root: PathBuf,
+        manifest_path: PathBuf,
+        current_executable_path: &Path,
+    ) -> Self {
+        let mut manager = Self::for_test(extension_id, runtime_root, manifest_path);
+        manager.current_executable_identity_override = Some(
+            file_identity(current_executable_path)
+                .expect("test current executable path should identify a file"),
+        );
+        manager
+    }
+
+    fn current_executable_identity(&self) -> RuntimeResult<FileIdentity> {
+        #[cfg(test)]
+        if let Some(identity) = &self.current_executable_identity_override {
+            return Ok(*identity);
+        }
+
+        current_executable_identity()
+    }
+
+    #[cfg(test)]
     pub(crate) fn running_process_count(&self) -> usize {
         let processes = self
             .processes
@@ -1095,9 +1128,19 @@ fn parse_constraints(value: &Value) -> RuntimeResult<RuntimeConstraints> {
         .map_err(|_| RuntimeError::invalid_params("Invalid Codex runtime constraints"))
 }
 
+#[cfg(test)]
 fn select_runtime_entry(
     constraints: &RuntimeConstraints,
     manifest_paths_override: Option<&[PathBuf]>,
+) -> RuntimeResult<RuntimeEntry> {
+    let current_host = current_executable_identity()?;
+    select_runtime_entry_for_host(constraints, manifest_paths_override, &current_host)
+}
+
+fn select_runtime_entry_for_host(
+    constraints: &RuntimeConstraints,
+    manifest_paths_override: Option<&[PathBuf]>,
+    current_host: &FileIdentity,
 ) -> RuntimeResult<RuntimeEntry> {
     let manifest_paths = manifest_paths_override
         .map(<[PathBuf]>::to_vec)
@@ -1139,7 +1182,6 @@ fn select_runtime_entry(
         ));
     }
 
-    let current_host = current_executable_identity()?;
     let mut matching = entries
         .into_iter()
         .filter_map(|entry| serde_json::from_value::<RuntimeEntry>(entry).ok())
@@ -1148,7 +1190,7 @@ fn select_runtime_entry(
                 && fs::canonicalize(&entry.paths.extension_host_path)
                     .ok()
                     .and_then(|path| file_identity(&path).ok())
-                    .is_some_and(|identity| identity == current_host)
+                    .is_some_and(|identity| &identity == current_host)
         })
         .collect::<Vec<_>>();
     matching.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
@@ -1187,7 +1229,10 @@ fn manifest_paths() -> Vec<PathBuf> {
     paths
 }
 
-fn validate_runtime_entry(entry: &RuntimeEntry) -> RuntimeResult<()> {
+fn validate_runtime_entry_for_host(
+    entry: &mut RuntimeEntry,
+    current_exe: &FileIdentity,
+) -> RuntimeResult<()> {
     if entry.entry_id.trim().is_empty()
         || entry.install_id.trim().is_empty()
         || entry.app_version.trim().is_empty()
@@ -1201,7 +1246,7 @@ fn validate_runtime_entry(entry: &RuntimeEntry) -> RuntimeResult<()> {
     }
     validate_owned_dir(&entry.paths.codex_home, true)?;
     validate_owned_dir(&entry.paths.resources_path, false)?;
-    validate_owned_file(&entry.paths.codex_cli_path, true)?;
+    entry.paths.codex_cli_path = validate_owned_file(&entry.paths.codex_cli_path, true)?;
     validate_owned_file(&entry.paths.extension_host_path, true)?;
     validate_owned_file(&entry.paths.node_path, true)?;
     if let Some(path) = &entry.paths.node_repl_path {
@@ -1214,10 +1259,9 @@ fn validate_runtime_entry(entry: &RuntimeEntry) -> RuntimeResult<()> {
         validate_owned_dir(path, false)?;
     }
 
-    let current_exe = current_executable_identity()?;
     let configured_host = file_identity(&entry.paths.extension_host_path)
         .map_err(|_| required_path_error("extensionHostPath"))?;
-    if current_exe != configured_host {
+    if current_exe != &configured_host {
         return Err(RuntimeError::typed(
             "no_matching_codex_install",
             "No compatible Codex app-server entry was found",
@@ -1226,7 +1270,7 @@ fn validate_runtime_entry(entry: &RuntimeEntry) -> RuntimeResult<()> {
     Ok(())
 }
 
-fn validate_owned_file(path: &Path, executable: bool) -> RuntimeResult<()> {
+fn validate_owned_file(path: &Path, executable: bool) -> RuntimeResult<PathBuf> {
     if !path.is_absolute() {
         return Err(required_path_error("file"));
     }
@@ -1243,7 +1287,7 @@ fn validate_owned_file(path: &Path, executable: bool) -> RuntimeResult<()> {
         return Err(required_path_error("executable"));
     }
     validate_trusted_parent_chain(&canonical)?;
-    Ok(())
+    Ok(canonical)
 }
 
 fn validate_owned_dir(path: &Path, require_user_owner: bool) -> RuntimeResult<()> {
@@ -1434,6 +1478,8 @@ fn start_app_server(
 
     let mut command = Command::new(&entry.paths.codex_cli_path);
     command
+        .arg("-c")
+        .arg("features.code_mode_host=true")
         .arg("app-server")
         .arg("--listen")
         .arg(format!("unix://{}", socket_path.display()))
@@ -2753,13 +2799,14 @@ mod tests {
         let root = test_root("manifest-selection");
         fs::create_dir_all(&root).unwrap();
         let manifest_path = root.join(MANIFEST_FILE_NAME);
-        let current_host = PathBuf::from("/proc/self/exe");
+        let current_host = env::current_exe().unwrap();
+        let other_host = test_executable("true");
         fs::write(
             &manifest_path,
             serde_json::to_vec(&json!({
                 "schemaVersion": 2,
                 "entries": [
-                    manifest_entry_json("other-host", Path::new("/bin/true"), "2099-01-01T00:00:00Z"),
+                    manifest_entry_json("other-host", &other_host, "2099-01-01T00:00:00Z"),
                     manifest_entry_json("current-host", &current_host, "2026-07-10T00:00:00Z")
                 ]
             }))
@@ -2794,13 +2841,14 @@ mod tests {
         );
 
         let no_match = root.join("no-match.json");
+        let current_host = env::current_exe().unwrap();
         fs::write(
             &no_match,
             serde_json::to_vec(&json!({
                 "schemaVersion": 2,
                 "entries": [manifest_entry_json(
                     "wrong-extension",
-                    Path::new("/proc/self/exe"),
+                    &current_host,
                     "2026-07-10T00:00:00Z"
                 )]
             }))
@@ -2842,6 +2890,34 @@ mod tests {
         fs::write(&executable, "binary").unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
         assert!(validate_owned_file(&executable, true).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn executable_validation_returns_the_canonical_path() {
+        let root = test_root("canonical-executable");
+        let package_dir = root.join("lib/node_modules/@openai/codex/bin");
+        let bin_dir = root.join("bin");
+        fs::create_dir_all(&package_dir).unwrap();
+        fs::create_dir_all(&bin_dir).unwrap();
+        for directory in [
+            root.clone(),
+            root.join("lib"),
+            root.join("lib/node_modules"),
+            root.join("lib/node_modules/@openai"),
+            root.join("lib/node_modules/@openai/codex"),
+            package_dir.clone(),
+            bin_dir.clone(),
+        ] {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let executable = package_dir.join("codex.js");
+        fs::write(&executable, "#!/usr/bin/env node\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let launcher = bin_dir.join("codex");
+        std::os::unix::fs::symlink(&executable, &launcher).unwrap();
+
+        assert_eq!(validate_owned_file(&launcher, true).unwrap(), executable);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -3047,6 +3123,7 @@ mod tests {
     }
 
     fn test_entry() -> RuntimeEntry {
+        let executable = env::current_exe().unwrap();
         RuntimeEntry {
             schema_version: 2,
             app_server_protocol_version: 2,
@@ -3062,10 +3139,10 @@ mod tests {
             native_host_version: "1.2.3".to_string(),
             paths: RuntimePaths {
                 browser_client_path: None,
-                codex_cli_path: PathBuf::from("/bin/true"),
+                codex_cli_path: executable.clone(),
                 codex_home: PathBuf::from("/tmp"),
-                extension_host_path: PathBuf::from("/bin/true"),
-                node_path: PathBuf::from("/bin/true"),
+                extension_host_path: executable.clone(),
+                node_path: executable,
                 node_module_dirs: Vec::new(),
                 node_repl_path: None,
                 resources_path: PathBuf::from("/tmp"),
@@ -3077,6 +3154,7 @@ mod tests {
     }
 
     fn manifest_entry_json(entry_id: &str, extension_host_path: &Path, updated_at: &str) -> Value {
+        let executable = env::current_exe().unwrap();
         json!({
             "schemaVersion": 2,
             "appServerProtocolVersion": 2,
@@ -3091,10 +3169,10 @@ mod tests {
             "nativeHostProtocolVersion": 2,
             "nativeHostVersion": "1.2.3",
             "paths": {
-                "codexCliPath": "/bin/true",
+                "codexCliPath": executable,
                 "codexHome": "/tmp",
                 "extensionHostPath": extension_host_path,
-                "nodePath": "/bin/true",
+                "nodePath": executable,
                 "resourcesPath": "/tmp"
             },
             "proxyHost": "127.0.0.1",
@@ -3111,11 +3189,28 @@ mod tests {
         ))
     }
 
+    fn test_executable(name: &str) -> PathBuf {
+        let path = env::var_os("PATH").expect("PATH is required for runtime tests");
+        env::split_paths(&path)
+            .filter(|directory| directory.is_absolute())
+            .map(|directory| directory.join(name))
+            .find(|candidate| {
+                fs::metadata(candidate).is_ok_and(|metadata| {
+                    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+                })
+            })
+            .unwrap_or_else(|| panic!("could not resolve test executable from PATH: {name}"))
+    }
+
     fn fake_socket_app_server(root: &Path) -> PathBuf {
         let path = root.join("fake-app-server.py");
+        let python = test_executable("python3");
         fs::write(
             &path,
-            r#"#!/usr/bin/python3
+            format!(
+                "#!{}\n{}",
+                python.display(),
+                r#"
 import signal
 import socket
 import sys
@@ -3129,11 +3224,48 @@ server.listen()
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 while True:
     time.sleep(0.1)
-"#,
+"#
+            ),
         )
         .unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
         path
+    }
+
+    #[test]
+    fn app_server_launch_enables_code_mode_host() {
+        let root = test_root("app-server-code-mode-host");
+        fs::create_dir_all(&root).unwrap();
+        let fake_cli = fake_socket_app_server(&root);
+        let mut entry = test_entry();
+        entry.paths.codex_cli_path = fake_cli;
+        entry.paths.codex_home = root.clone();
+        let runtime_root = root.join("runtime");
+
+        let mut process = start_app_server(
+            &entry,
+            "abcdefghijklmnopabcdefghijklmnop",
+            "sidepanel-code-mode-host",
+            41000,
+            &runtime_root,
+            1,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let cmdline = fs::read(format!("/proc/{}/cmdline", process.child.id())).unwrap();
+        let args = cmdline
+            .split(|byte| *byte == 0)
+            .filter(|value| !value.is_empty())
+            .map(|value| String::from_utf8(value.to_vec()).unwrap())
+            .collect::<Vec<_>>();
+        assert!(
+            args.windows(3)
+                .any(|window| window == ["-c", "features.code_mode_host=true", "app-server"]),
+            "app-server command line: {args:?}"
+        );
+
+        stop_managed_process(&mut process);
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn test_process_is_live(pid: libc::pid_t) -> bool {

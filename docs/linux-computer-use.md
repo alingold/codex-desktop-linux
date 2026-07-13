@@ -4,6 +4,11 @@ Linux Computer Use is an opt-in UI surface backed by a native Rust MCP backend,
 `codex-computer-use-linux`. The backend is bundled and registered by default;
 the in-app Computer Use controls are disabled until you opt in.
 
+After rebuilding or installing an update, fully quit every running Codex window
+and reopen the app once. The launcher refreshes bundled plugin caches and tool
+registration only during a cold start; opening another window on an older
+running process cannot activate a newly installed backend.
+
 It supports:
 
 - app listing and accessibility trees through AT-SPI
@@ -53,8 +58,8 @@ sudo zypper install xdotool
 ```
 
 The deb and RPM packages recommend `xdotool`, and the Arch package lists it as
-an optional dependency. Nix Computer Use UI outputs place `xdotool` on the app
-launcher `PATH`; the base Nix output does not add it.
+an optional dependency. Every Nix output places `xdotool` on the app launcher
+`PATH` because the Computer Use backend is available in every package variant.
 
 If `xdotool` is absent, X11 text entry falls back safely to the regular
 keyboard backend before changing the clipboard. Install `ydotool` when you
@@ -121,6 +126,7 @@ You can also run the backend directly:
 
 ```bash
 ./codex-app/resources/plugins/openai-bundled/plugins/computer-use/bin/codex-computer-use-linux doctor
+./codex-app/resources/plugins/openai-bundled/plugins/computer-use/bin/codex-computer-use-linux doctor --summary
 ./codex-app/resources/plugins/openai-bundled/plugins/computer-use/bin/codex-computer-use-linux setup
 ./codex-app/resources/plugins/openai-bundled/plugins/computer-use/bin/codex-computer-use-linux apps
 ./codex-app/resources/plugins/openai-bundled/plugins/computer-use/bin/codex-computer-use-linux windows
@@ -170,13 +176,13 @@ upstream server-side availability.
 Nix:
 
 ```bash
-nix run github:ilysenko/codex-desktop-linux#codex-desktop-computer-use-ui
+nix run github:alingold/codex-desktop-linux#codex-desktop-computer-use-ui
 ```
 
 Combined with a Linux feature output:
 
 ```bash
-nix run github:ilysenko/codex-desktop-linux#computer-use-ui-remote-mobile-control
+nix run github:alingold/codex-desktop-linux#computer-use-ui-remote-mobile-control
 ```
 
 ## Side-By-Side Dev Variant

@@ -137,8 +137,32 @@ pub struct ReadinessReport {
     pub can_focus_apps: bool,
     pub can_focus_windows: bool,
     pub can_send_development_input: bool,
+    /// Runtime readiness for each input tool. Unlike the legacy aggregate
+    /// boolean, this makes partial installations explicit to agents and setup
+    /// tooling.
+    pub input_actions: BTreeMap<String, InputActionReadiness>,
     pub recommended_next_step: String,
     pub blockers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct InputActionReadiness {
+    pub ready: bool,
+    pub backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InputBackendOverride {
+    Ydotool,
+    Portal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct InputBackendOverrides {
+    pub pointer: Option<InputBackendOverride>,
+    pub keyboard: Option<InputBackendOverride>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -196,6 +220,92 @@ pub fn doctor_report() -> DoctorReport {
     }
 }
 
+/// Render the stable, human-facing subset used by setup and support flows.
+/// The full `doctor` JSON remains the machine-readable source of detail.
+pub fn doctor_summary(report: &DoctorReport) -> String {
+    let readiness = &report.readiness;
+    let screenshot_ready = report.capabilities.preferred.screenshot.is_some();
+    let checks = [
+        ("mcp", readiness.can_register_mcp_tools),
+        ("accessibility", readiness.can_build_accessibility_tree),
+        ("windows", readiness.can_query_windows),
+        ("app_focus", readiness.can_focus_apps),
+        ("exact_focus", readiness.can_focus_windows),
+        ("input", readiness.can_send_development_input),
+        ("screenshot", screenshot_ready),
+    ];
+    let ready = checks.iter().all(|(_, ready)| *ready) && readiness.blockers.is_empty();
+    let yes_no = |ready: bool| if ready { "yes" } else { "no" };
+    let mut lines = vec![
+        format!(
+            "Computer Use doctor result: {}",
+            if ready { "READY" } else { "DEGRADED" }
+        ),
+        format!(
+            "Capabilities: {}",
+            checks
+                .iter()
+                .map(|(name, ready)| format!("{name}={}", yes_no(*ready)))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+        format!(
+            "Input actions: {}",
+            readiness
+                .input_actions
+                .iter()
+                .map(|(name, action)| format!(
+                    "{name}={}",
+                    action.backend.as_deref().unwrap_or("unavailable")
+                ))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+        format!(
+            "Preferred backends: input={} screenshot={} window_control={}",
+            report
+                .capabilities
+                .preferred
+                .input
+                .as_deref()
+                .unwrap_or("none"),
+            report
+                .capabilities
+                .preferred
+                .screenshot
+                .as_deref()
+                .unwrap_or("none"),
+            report
+                .capabilities
+                .preferred
+                .window_control
+                .as_deref()
+                .unwrap_or("none"),
+        ),
+    ];
+    lines.extend(
+        readiness
+            .blockers
+            .iter()
+            .map(|blocker| format!("Blocker: {blocker}")),
+    );
+    if !screenshot_ready {
+        lines.push(
+            "Blocker: No screenshot backend was detected; enable a supported desktop or XDG Screenshot portal backend."
+                .to_string(),
+        );
+    }
+    lines.push(format!(
+        "Recommended next step: {}",
+        if !screenshot_ready && readiness.blockers.is_empty() {
+            "Enable a supported screenshot backend, then rerun doctor --summary."
+        } else {
+            readiness.recommended_next_step.as_str()
+        }
+    ));
+    lines.join("\n")
+}
+
 /// Derive the per-layer backend capability map from the individual checks. Lists
 /// are ordered best-first and mirror the order the tool actually tries them.
 fn capability_map(
@@ -206,18 +316,31 @@ fn capability_map(
     input: &InputReport,
 ) -> CapabilityMap {
     let mut input_backends = Vec::new();
-    // Absolute uinput pointer: accurate, non-blocking of coordinates; preferred.
+    let x11_xdotool = is_x11_platform(platform) && input.xdotool.ok;
+    let ydotool = complete_ydotool_available(input);
+    // Keep this order aligned with the runtime pointer fallback order. Native
+    // X11 input is preferred to a portal permission prompt; on Wayland a
+    // running ydotoold remains the prompt-free preferred fallback.
     if input.uinput.ok {
         input_backends.push("abs_pointer".to_string());
     }
-    if portals.remote_desktop.ok {
-        input_backends.push("portal".to_string());
-    }
-    if is_x11_platform(platform) && input.xdotool.ok {
-        input_backends.push("xdotool_x11_keyboard_text".to_string());
-    }
-    if input.ydotool_socket.ok {
-        input_backends.push("ydotool".to_string());
+    if is_x11_platform(platform) {
+        if x11_xdotool {
+            input_backends.push("xdotool_x11".to_string());
+        }
+        if portals.remote_desktop.ok {
+            input_backends.push("portal".to_string());
+        }
+        if ydotool {
+            input_backends.push("ydotool".to_string());
+        }
+    } else {
+        if ydotool {
+            input_backends.push("ydotool".to_string());
+        }
+        if portals.remote_desktop.ok {
+            input_backends.push("portal".to_string());
+        }
     }
 
     let mut screenshot_backends = Vec::new();
@@ -274,8 +397,25 @@ fn capability_map(
         isolation.push("headless_gnome".to_string());
     }
 
+    let overrides = input_backend_overrides();
+    let preferred_input = match overrides.pointer {
+        Some(InputBackendOverride::Ydotool) => input_backends
+            .iter()
+            .find(|backend| backend.as_str() == "ydotool")
+            .cloned(),
+        Some(InputBackendOverride::Portal) => input_backends
+            .iter()
+            .find(|backend| backend.as_str() == "portal")
+            .or_else(|| {
+                input_backends
+                    .iter()
+                    .find(|backend| backend.as_str() == "ydotool")
+            })
+            .cloned(),
+        None => input_backends.first().cloned(),
+    };
     let preferred = PreferredBackends {
-        input: input_backends.first().cloned(),
+        input: preferred_input,
         screenshot: screenshot_backends.first().cloned(),
         window_control: window_backends.first().cloned(),
     };
@@ -646,7 +786,9 @@ fn check_from_backend_probe(probe: &registry::BackendProbe) -> Check {
 
 fn input_report() -> InputReport {
     InputReport {
-        xdotool: command_path_check("xdotool"),
+        // `command -v` is insufficient here: xdotool can be installed while
+        // unable to connect to this process's X11 display.
+        xdotool: command_check("xdotool", &["getmouselocation", "--shell"]),
         ydotool: command_path_check("ydotool"),
         ydotoold: process_check("ydotoold"),
         ydotool_socket: ydotool_socket_check(),
@@ -666,7 +808,8 @@ fn readiness_report(
     let can_query_windows = windowing.can_list_windows;
     let can_focus_apps = windowing.can_focus_apps;
     let can_focus_windows = windowing.can_focus_windows;
-    let can_send_development_input = can_send_development_input(platform, portals, input);
+    let input_actions = input_action_readiness(platform, portals, input);
+    let can_send_development_input = input_actions.values().all(|action| action.ready);
 
     if !can_build_accessibility_tree {
         blockers.push(
@@ -692,9 +835,16 @@ fn readiness_report(
     }
 
     if !can_send_development_input {
+        let unavailable = input_actions
+            .iter()
+            .filter(|(_, action)| !action.ready)
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
         blockers.push(
-            "Complete keyboard and pointer input is unavailable; enable XDG RemoteDesktop portal input or ydotool with a connectable ydotoold socket. On X11, xdotool plus read/write /dev/uinput is also complete; /dev/uinput access alone is pointer-only."
-                .to_string(),
+            format!(
+                "Complete keyboard and pointer input is unavailable for actions: {unavailable}. On X11 install xdotool. Otherwise enable XDG RemoteDesktop portal input or install ydotool and start ydotoold with a connectable socket; /dev/uinput access alone is pointer-only."
+            ),
         );
     }
 
@@ -713,7 +863,7 @@ fn readiness_report(
     } else if !can_focus_windows {
         "Enable an exact-focus window backend before using window_id, title, or terminal-targeted input.".to_string()
     } else if !can_send_development_input {
-        "Enable a complete input backend: enable the XDG RemoteDesktop portal or start ydotoold with a socket accessible to this desktop user. On X11, install xdotool and grant read/write /dev/uinput; /dev/uinput alone is pointer-only."
+        "Enable a complete input backend using the per-action remediation in input_actions. On X11, install xdotool. Otherwise enable the XDG RemoteDesktop portal or install ydotool and start ydotoold with a socket accessible to this desktop user."
             .to_string()
     } else {
         "Computer Use is ready: AT-SPI tree support, window targeting, and a Linux input backend are available."
@@ -727,19 +877,198 @@ fn readiness_report(
         can_focus_apps,
         can_focus_windows,
         can_send_development_input,
+        input_actions,
         recommended_next_step,
         blockers,
     }
 }
 
-fn can_send_development_input(
+fn input_action_readiness(
     platform: &PlatformReport,
     portals: &PortalReport,
     input: &InputReport,
+) -> BTreeMap<String, InputActionReadiness> {
+    input_action_readiness_with_overrides(platform, portals, input, input_backend_overrides())
+}
+
+fn input_action_readiness_with_overrides(
+    platform: &PlatformReport,
+    portals: &PortalReport,
+    input: &InputReport,
+    overrides: InputBackendOverrides,
+) -> BTreeMap<String, InputActionReadiness> {
+    let x11_xdotool = is_x11_platform(platform) && input.xdotool.ok;
+    let x11 = is_x11_platform(platform);
+    let kde_wayland = is_kde_wayland_platform(platform);
+    let portal = portals.remote_desktop.ok;
+    let ydotool = complete_ydotool_available(input);
+
+    let pointer_backend = || {
+        if overrides.pointer == Some(InputBackendOverride::Ydotool) {
+            preferred_input_backend(&[(ydotool, "ydotool")])
+        } else if overrides.pointer == Some(InputBackendOverride::Portal) {
+            // Forced portal bypasses native pointer backends, but runtime keeps
+            // ydotool as a last-resort fallback if portal setup is unavailable.
+            preferred_input_backend(&[(portal, "portal"), (ydotool, "ydotool")])
+        } else if x11 {
+            preferred_input_backend(&[
+                (input.uinput.ok, "abs_pointer"),
+                (x11_xdotool, "xdotool_x11"),
+                (portal, "portal"),
+                (ydotool, "ydotool"),
+            ])
+        } else {
+            preferred_input_backend(&[
+                (input.uinput.ok, "abs_pointer"),
+                (ydotool, "ydotool"),
+                (portal, "portal"),
+            ])
+        }
+    };
+    // The absolute pointer deliberately does not implement wheel input, while
+    // the other pointer backends do.
+    let pointer_without_absolute = || {
+        if overrides.pointer == Some(InputBackendOverride::Ydotool) {
+            preferred_input_backend(&[(ydotool, "ydotool")])
+        } else if overrides.pointer == Some(InputBackendOverride::Portal) {
+            preferred_input_backend(&[(portal, "portal"), (ydotool, "ydotool")])
+        } else if x11 {
+            preferred_input_backend(&[
+                (x11_xdotool, "xdotool_x11"),
+                (portal, "portal"),
+                (ydotool, "ydotool"),
+            ])
+        } else {
+            preferred_input_backend(&[(ydotool, "ydotool"), (portal, "portal")])
+        }
+    };
+    let keyboard_backend = || {
+        if overrides.keyboard == Some(InputBackendOverride::Ydotool) {
+            preferred_input_backend(&[(ydotool, "ydotool")])
+        } else if overrides.keyboard == Some(InputBackendOverride::Portal) {
+            preferred_input_backend(&[(portal, "portal")])
+        } else if x11 {
+            preferred_input_backend(&[(x11_xdotool, "xdotool_x11"), (ydotool, "ydotool")])
+        } else {
+            preferred_input_backend(&[(ydotool, "ydotool"), (portal, "portal")])
+        }
+    };
+    let type_text_backend = || {
+        if overrides.keyboard.is_none() && kde_wayland {
+            preferred_input_backend(&[(ydotool, "ydotool")])
+        } else {
+            keyboard_backend()
+        }
+    };
+    let mut actions = BTreeMap::new();
+    for name in ["click", "drag", "draw_path"] {
+        actions.insert(name.to_string(), input_action(pointer_backend()));
+    }
+    actions.insert(
+        "scroll".to_string(),
+        input_action(pointer_without_absolute()),
+    );
+    actions.insert("press_key".to_string(), input_action(keyboard_backend()));
+    let mut type_text = input_action(type_text_backend());
+    if overrides.keyboard.is_none() && kde_wayland && !type_text.ready {
+        type_text.remediation = Some(
+            "Install ydotool and start ydotoold with an accessible socket. KDE clipboard paste may work at runtime, but readiness does not claim it until Klipper availability can be verified."
+                .to_string(),
+        );
+    }
+    actions.insert("type_text".to_string(), type_text);
+    for (names, backend_override) in [
+        (
+            &["click", "scroll", "drag", "draw_path"][..],
+            overrides.pointer,
+        ),
+        (&["press_key", "type_text"][..], overrides.keyboard),
+    ] {
+        let Some(backend_override) = backend_override else {
+            continue;
+        };
+        let backend = match backend_override {
+            InputBackendOverride::Ydotool => "ydotool",
+            InputBackendOverride::Portal => "portal",
+        };
+        for name in names {
+            if let Some(action) = actions.get_mut(*name) {
+                if !action.ready {
+                    action.remediation = Some(format!(
+                        "The {backend} FORCE override is enabled, but that backend is not ready. Fix or remove the override, then rerun doctor --summary."
+                    ));
+                }
+            }
+        }
+    }
+    actions
+}
+
+fn preferred_input_backend(candidates: &[(bool, &'static str)]) -> Option<&'static str> {
+    candidates
+        .iter()
+        .find_map(|(available, backend)| available.then_some(*backend))
+}
+
+fn input_action(backend: Option<&str>) -> InputActionReadiness {
+    InputActionReadiness {
+        ready: backend.is_some(),
+        backend: backend.map(str::to_string),
+        remediation: backend.is_none().then(|| {
+            "On X11 install xdotool (for example: sudo apt install xdotool). Otherwise enable the XDG RemoteDesktop portal or install ydotool and start ydotoold with an accessible socket."
+                .to_string()
+        }),
+    }
+}
+
+fn complete_ydotool_available(input: &InputReport) -> bool {
+    complete_ydotool_policy(input.ydotool.ok, input.ydotoold.ok, input.ydotool_socket.ok)
+}
+
+pub(crate) fn complete_ydotool_policy(
+    executable_available: bool,
+    daemon_running: bool,
+    socket_connectable: bool,
 ) -> bool {
-    portals.remote_desktop.ok
-        || input.ydotool.ok && input.ydotoold.ok && input.ydotool_socket.ok
-        || is_x11_platform(platform) && input.xdotool.ok && input.uinput.ok
+    executable_available && daemon_running && socket_connectable
+}
+
+pub(crate) fn input_backend_overrides() -> InputBackendOverrides {
+    input_backend_overrides_from(|key| env::var(key).ok().as_deref() == Some("1"))
+}
+
+fn input_backend_overrides_from(enabled: impl Fn(&str) -> bool) -> InputBackendOverrides {
+    let selected = |ydotool_keys: &[&str], portal_keys: &[&str]| {
+        if ydotool_keys.iter().any(|key| enabled(key)) {
+            Some(InputBackendOverride::Ydotool)
+        } else if portal_keys.iter().any(|key| enabled(key)) {
+            Some(InputBackendOverride::Portal)
+        } else {
+            None
+        }
+    };
+    InputBackendOverrides {
+        pointer: selected(
+            &[
+                "COMPUTER_USE_LINUX_FORCE_YDOTOOL_POINTER",
+                "CODEX_COMPUTER_USE_FORCE_YDOTOOL_POINTER",
+            ],
+            &[
+                "COMPUTER_USE_LINUX_FORCE_PORTAL_POINTER",
+                "CODEX_COMPUTER_USE_FORCE_PORTAL_POINTER",
+            ],
+        ),
+        keyboard: selected(
+            &[
+                "COMPUTER_USE_LINUX_FORCE_YDOTOOL_KEYBOARD",
+                "CODEX_COMPUTER_USE_FORCE_YDOTOOL_KEYBOARD",
+            ],
+            &[
+                "COMPUTER_USE_LINUX_FORCE_PORTAL_KEYBOARD",
+                "CODEX_COMPUTER_USE_FORCE_PORTAL_KEYBOARD",
+            ],
+        ),
+    }
 }
 
 fn is_x11_platform(platform: &PlatformReport) -> bool {
@@ -748,6 +1077,19 @@ fn is_x11_platform(platform: &PlatformReport) -> bool {
         .as_deref()
         .is_some_and(|session| session.eq_ignore_ascii_case("x11"))
         || (platform.display.is_some() && platform.wayland_display.is_none())
+}
+
+fn is_kde_wayland_platform(platform: &PlatformReport) -> bool {
+    !is_x11_platform(platform)
+        && platform.xdg_session_type.as_deref() == Some("wayland")
+        && (platform
+            .xdg_current_desktop
+            .as_deref()
+            .is_some_and(|desktop| desktop.to_ascii_lowercase().contains("kde"))
+            || platform
+                .desktop_session
+                .as_deref()
+                .is_some_and(|session| session.to_ascii_lowercase().contains("plasma")))
 }
 
 fn is_cosmic_wayland_platform(platform: &PlatformReport) -> bool {
@@ -1366,6 +1708,234 @@ mod tests {
 
         assert!(readiness.can_send_development_input);
         assert!(readiness.blockers.is_empty());
+    }
+
+    #[test]
+    fn x11_xdotool_is_a_complete_action_specific_backend() {
+        let mut platform = platform_report();
+        platform.xdg_session_type = Some("x11".to_string());
+        platform.wayland_display = None;
+        let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
+        let windowing = windowing_report(true, true);
+        let mut input = input_report_parts(
+            Check::fail("ydotool missing"),
+            Check::fail("ydotoold not running"),
+            Check::fail("no socket"),
+            Check::fail("/dev/uinput unavailable"),
+        );
+        input.xdotool = Check::ok("/usr/bin/xdotool");
+
+        let readiness = readiness_report(
+            &platform,
+            &portal_report(Check::fail("missing")),
+            &accessibility,
+            &windowing,
+            &input,
+        );
+
+        assert!(readiness.can_send_development_input);
+        assert!(readiness.input_actions.values().all(|action| action.ready));
+        assert!(readiness.input_actions.values().all(|action| {
+            action.backend.as_deref() == Some("xdotool_x11") && action.remediation.is_none()
+        }));
+    }
+
+    #[test]
+    fn doctor_summary_uses_action_readiness_without_reinterpreting_backends() {
+        let mut platform = platform_report();
+        platform.xdg_session_type = Some("x11".to_string());
+        platform.wayland_display = None;
+        platform.gnome_shell_screenshot = Check::fail("missing");
+        platform.gnome_screenshot = Check::fail("missing");
+        let mut portals = portal_report(Check::ok("RemoteDesktop portal"));
+        portals.screenshot = Check::ok("Screenshot portal");
+        let accessibility = accessibility_report(Check::ok("bus"), Check::ok("true"));
+        let mut windowing = windowing_report(true, true);
+        windowing.codex_gnome_shell_extension_screenshot = Check::fail("missing");
+        let mut input = input_report_parts(
+            Check::fail("ydotool missing"),
+            Check::fail("ydotoold not running"),
+            Check::fail("no socket"),
+            Check::fail("/dev/uinput unavailable"),
+        );
+        input.xdotool = Check::ok("/usr/bin/xdotool");
+        let readiness = readiness_report(&platform, &portals, &accessibility, &windowing, &input);
+        let capabilities = capability_map(&platform, &portals, &accessibility, &windowing, &input);
+        let report = DoctorReport {
+            platform,
+            portals,
+            accessibility,
+            windowing,
+            input,
+            readiness,
+            capabilities,
+        };
+
+        let summary = doctor_summary(&report);
+
+        assert!(summary.contains("Computer Use doctor result: READY"));
+        assert!(summary.contains("draw_path=xdotool_x11"));
+        assert!(summary.contains("screenshot=portal"));
+        assert!(!summary.contains("Blocker:"));
+    }
+
+    #[test]
+    fn pointer_only_uinput_reports_exact_unavailable_actions_and_remediation() {
+        let mut platform = platform_report();
+        platform.xdg_session_type = Some("x11".to_string());
+        platform.wayland_display = None;
+        let input = input_report_parts(
+            Check::fail("ydotool missing"),
+            Check::fail("ydotoold not running"),
+            Check::fail("no socket"),
+            Check::ok("read/write: /dev/uinput"),
+        );
+
+        let actions =
+            input_action_readiness(&platform, &portal_report(Check::fail("missing")), &input);
+
+        assert_eq!(actions["draw_path"].backend.as_deref(), Some("abs_pointer"));
+        assert!(!actions["scroll"].ready);
+        assert!(!actions["press_key"].ready);
+        assert!(actions["scroll"]
+            .remediation
+            .as_deref()
+            .is_some_and(|message| message.contains("install xdotool")));
+    }
+
+    #[test]
+    fn x11_portal_is_reported_when_native_pointer_input_is_unavailable() {
+        let mut platform = platform_report();
+        platform.xdg_session_type = Some("x11".to_string());
+        platform.wayland_display = None;
+        let input = input_report_parts(
+            Check::fail("ydotool missing"),
+            Check::fail("ydotoold not running"),
+            Check::fail("no socket"),
+            Check::fail("/dev/uinput unavailable"),
+        );
+
+        let actions = input_action_readiness(
+            &platform,
+            &portal_report(Check::ok("RemoteDesktop portal")),
+            &input,
+        );
+
+        for action in ["click", "scroll", "drag", "draw_path"] {
+            assert_eq!(actions[action].backend.as_deref(), Some("portal"));
+        }
+        assert!(!actions["press_key"].ready);
+        assert!(!actions["type_text"].ready);
+    }
+
+    #[test]
+    fn x11_pointer_prefers_portal_after_missing_xdotool_but_keyboard_uses_ydotool() {
+        let mut platform = platform_report();
+        platform.xdg_session_type = Some("x11".to_string());
+        platform.wayland_display = None;
+        let mut input = input_report_parts(
+            Check::ok("ydotool"),
+            Check::ok("ydotoold"),
+            Check::ok("connectable socket"),
+            Check::fail("/dev/uinput unavailable"),
+        );
+        input.xdotool = Check::fail("xdotool missing");
+
+        let actions = input_action_readiness(
+            &platform,
+            &portal_report(Check::ok("RemoteDesktop portal")),
+            &input,
+        );
+
+        assert_eq!(actions["draw_path"].backend.as_deref(), Some("portal"));
+        assert_eq!(actions["scroll"].backend.as_deref(), Some("portal"));
+        assert_eq!(actions["press_key"].backend.as_deref(), Some("ydotool"));
+        assert_eq!(actions["type_text"].backend.as_deref(), Some("ydotool"));
+    }
+
+    #[test]
+    fn kde_wayland_portal_does_not_claim_type_text_without_known_clipboard_backend() {
+        let mut platform = platform_report();
+        platform.xdg_current_desktop = Some("KDE".to_string());
+        platform.desktop_session = Some("plasma".to_string());
+        let input = input_report_parts(
+            Check::fail("ydotool missing"),
+            Check::fail("ydotoold not running"),
+            Check::fail("no socket"),
+            Check::fail("/dev/uinput unavailable"),
+        );
+
+        let actions = input_action_readiness(
+            &platform,
+            &portal_report(Check::ok("RemoteDesktop portal")),
+            &input,
+        );
+
+        assert_eq!(actions["press_key"].backend.as_deref(), Some("portal"));
+        assert!(!actions["type_text"].ready);
+        assert!(actions["type_text"].backend.is_none());
+    }
+
+    #[test]
+    fn force_overrides_replace_default_action_backends() {
+        let mut platform = platform_report();
+        platform.xdg_session_type = Some("x11".to_string());
+        platform.wayland_display = None;
+        let mut input = input_report_parts(
+            Check::fail("ydotool missing"),
+            Check::fail("ydotoold missing"),
+            Check::fail("socket missing"),
+            Check::ok("uinput"),
+        );
+        input.xdotool = Check::ok("xdotool connected");
+        let portals = portal_report(Check::ok("RemoteDesktop portal"));
+
+        let forced_ydotool = input_action_readiness_with_overrides(
+            &platform,
+            &portals,
+            &input,
+            InputBackendOverrides {
+                pointer: Some(InputBackendOverride::Ydotool),
+                keyboard: Some(InputBackendOverride::Ydotool),
+            },
+        );
+        assert!(forced_ydotool.values().all(|action| !action.ready));
+
+        let forced_portal = input_action_readiness_with_overrides(
+            &platform,
+            &portals,
+            &input,
+            InputBackendOverrides {
+                pointer: Some(InputBackendOverride::Portal),
+                keyboard: Some(InputBackendOverride::Portal),
+            },
+        );
+        assert!(forced_portal
+            .values()
+            .all(|action| action.backend.as_deref() == Some("portal")));
+    }
+
+    #[test]
+    fn force_override_parser_uses_aliases_and_ydotool_precedence() {
+        let overrides = input_backend_overrides_from(|key| {
+            matches!(
+                key,
+                "CODEX_COMPUTER_USE_FORCE_PORTAL_POINTER"
+                    | "CODEX_COMPUTER_USE_FORCE_YDOTOOL_KEYBOARD"
+                    | "CODEX_COMPUTER_USE_FORCE_PORTAL_KEYBOARD"
+            )
+        });
+
+        assert_eq!(overrides.pointer, Some(InputBackendOverride::Portal));
+        assert_eq!(overrides.keyboard, Some(InputBackendOverride::Ydotool));
+    }
+
+    #[test]
+    fn complete_ydotool_policy_requires_all_three_checks() {
+        assert!(complete_ydotool_policy(true, true, true));
+        assert!(!complete_ydotool_policy(false, true, true));
+        assert!(!complete_ydotool_policy(true, false, true));
+        assert!(!complete_ydotool_policy(true, true, false));
     }
 
     #[test]

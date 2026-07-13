@@ -4,7 +4,7 @@
  "http://www.freedesktop.org/software/polkit/policyconfig-1.dtd">
 <policyconfig>
   <vendor>ChatGPT Desktop for Linux</vendor>
-  <vendor_url>https://github.com/ilysenko/codex-desktop-linux</vendor_url>
+  <vendor_url>https://github.com/alingold/codex-desktop-linux</vendor_url>
   <icon_name>codex-desktop</icon_name>
 
   <action id="com.github.ilysenko.codex-desktop-linux.update.install-deb">

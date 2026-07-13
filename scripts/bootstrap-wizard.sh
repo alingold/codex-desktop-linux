@@ -733,125 +733,32 @@ run_computer_use_doctor() {
     if [ "$timeout_seconds" -lt 1 ] || [ "$timeout_seconds" -gt 300 ]; then
         error "CODEX_BOOTSTRAP_DOCTOR_TIMEOUT must be an integer from 1 to 300"
     fi
-    command -v python3 >/dev/null 2>&1 || {
-        warn "Cannot run the bounded Computer Use doctor because python3 is missing."
+    command -v timeout >/dev/null 2>&1 || {
+        warn "Cannot run the bounded Computer Use doctor because timeout(1) is missing."
         return 0
     }
 
-    info "Running read-only Computer Use doctor (timeout ${timeout_seconds}s): $doctor doctor"
-    local records
-    records="$(python3 - "$doctor" "$timeout_seconds" <<'PY'
-import json
-import subprocess
-import sys
+    info "Running read-only Computer Use doctor (timeout ${timeout_seconds}s): $doctor doctor --summary"
+    local output="" status=0 line
+    if output="$(timeout --kill-after=1 "${timeout_seconds}s" "$doctor" doctor --summary </dev/null 2>&1)"; then
+        while IFS= read -r line; do
+            [ -n "$line" ] || continue
+            case "$line" in
+                "Computer Use doctor result: DEGRADED"|"Blocker: "*) warn "$line" ;;
+                *) info "$line" ;;
+            esac
+        done <<< "$output"
+        return 0
+    else
+        status=$?
+    fi
 
-binary = sys.argv[1]
-timeout_seconds = int(sys.argv[2])
-
-def clean(value):
-    return " ".join(str(value).replace("\t", " ").splitlines()).strip()
-
-def record(kind, value):
-    print(f"{kind}\t{clean(value)}")
-
-try:
-    completed = subprocess.run(
-        [binary, "doctor"],
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        timeout=timeout_seconds,
-        check=False,
-    )
-except subprocess.TimeoutExpired:
-    record("error", f"timed out after {timeout_seconds}s")
-    raise SystemExit(0)
-except OSError as exc:
-    record("error", f"could not start doctor: {exc}")
-    raise SystemExit(0)
-except Exception as exc:
-    record("error", f"doctor execution failed: {exc}")
-    raise SystemExit(0)
-
-stdout = completed.stdout.decode("utf-8", errors="replace")
-stderr = completed.stderr.decode("utf-8", errors="replace")
-
-if completed.returncode != 0:
-    detail = stderr.strip() or stdout.strip() or "no diagnostic output"
-    record("error", f"doctor exited {completed.returncode}: {detail[:400]}")
-    raise SystemExit(0)
-
-try:
-    report = json.loads(stdout)
-except Exception as exc:
-    record("error", f"doctor returned invalid JSON: {exc}")
-    raise SystemExit(0)
-
-if not isinstance(report, dict) or not isinstance(report.get("readiness"), dict):
-    record("error", "doctor JSON is missing the readiness object")
-    raise SystemExit(0)
-
-readiness = report["readiness"]
-capabilities = report.get("capabilities") if isinstance(report.get("capabilities"), dict) else {}
-preferred = capabilities.get("preferred") if isinstance(capabilities.get("preferred"), dict) else {}
-
-checks = {
-    "mcp": readiness.get("can_register_mcp_tools") is True,
-    "accessibility": readiness.get("can_build_accessibility_tree") is True,
-    "windows": readiness.get("can_query_windows") is True,
-    "app_focus": readiness.get("can_focus_apps") is True,
-    "exact_focus": readiness.get("can_focus_windows") is True,
-    "input": readiness.get("can_send_development_input") is True,
-    "screenshot": bool(preferred.get("screenshot")),
-}
-blockers = [clean(item) for item in readiness.get("blockers", []) if clean(item)] \
-    if isinstance(readiness.get("blockers"), list) else []
-if not checks["screenshot"]:
-    blockers.append("No screenshot backend was detected; install or enable the desktop portal or a supported compositor screenshot backend.")
-
-record("status", "READY" if all(checks.values()) and not blockers else "DEGRADED")
-record("capabilities", " ".join(f"{name}={'yes' if ready else 'no'}" for name, ready in checks.items()))
-record(
-    "backends",
-    " ".join(
-        f"{name}={preferred.get(name) or 'none'}"
-        for name in ("input", "screenshot", "window_control")
-    ),
-)
-for blocker in blockers:
-    record("blocker", blocker)
-next_step = readiness.get("recommended_next_step")
-if next_step:
-    record("next", next_step)
-PY
-)"
-
-    local kind detail
-    while IFS=$'\t' read -r kind detail; do
-        case "$kind" in
-            status)
-                if [ "$detail" = "READY" ]; then
-                    info "Computer Use doctor result: READY"
-                else
-                    warn "Computer Use doctor result: DEGRADED"
-                fi
-                ;;
-            capabilities)
-                info "  Capabilities: $detail"
-                ;;
-            backends)
-                info "  Preferred backends: $detail"
-                ;;
-            blocker)
-                warn "  Blocker: $detail"
-                ;;
-            next)
-                info "  Recommended next step: $detail"
-                ;;
-            error)
-                warn "Computer Use doctor could not complete: $detail"
-                ;;
-        esac
-    done <<< "$records"
+    output="${output:0:400}"
+    if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
+        warn "Computer Use doctor could not complete: timed out after ${timeout_seconds}s"
+    else
+        warn "Computer Use doctor could not complete: doctor --summary exited $status${output:+: $output}"
+    fi
 }
 
 maybe_run_computer_use_doctor() {
@@ -1231,7 +1138,7 @@ print_safe_disable_guidance() {
 
     if list_includes_id "$disable_raw" "remote-mobile-control"; then
         local config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
-        local key_file="$config_home/codex-desktop/remote-control-device-keys-v1.json"
+        local key_file="$config_home/codex-desktop/remote-control-device-keys/remote-control-device-keys-v1.json"
         info "Remote mobile control opt-out: Not deleting $key_file."
         info "Revoke paired devices from Codex Settings/Connections or ChatGPT before deleting local keys manually."
     fi
@@ -1355,7 +1262,7 @@ run_feature_cleanup() {
 
     if list_includes_id "$cleanup_raw" "remote-mobile-control"; then
         local config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
-        local key_file="$config_home/codex-desktop/remote-control-device-keys-v1.json"
+        local key_file="$config_home/codex-desktop/remote-control-device-keys/remote-control-device-keys-v1.json"
         info "Remote mobile control cleanup: revoke paired devices in Codex Settings/Connections or ChatGPT before deleting local keys."
         confirm_and_delete_path "$key_file"
     fi
@@ -1379,6 +1286,8 @@ run_feature_cleanup() {
 }
 
 print_package_mode_guidance() {
+    info "Computer Use build plan: UI requested=$(computer_use_ui_state); native backend will be staged during the build"
+    info "After installing, fully quit and reopen ChatGPT Desktop once. Bundled plugin and tool registration is refreshed only during a cold start."
     if package_with_updater_enabled; then
         info "Default native package mode includes codex-update-manager."
         info "Next rebuild/reinstall command: make install-native"
