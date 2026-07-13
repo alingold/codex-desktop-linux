@@ -3328,7 +3328,7 @@ JSON
     assert_contains "$output_log" "Enabled Linux features: remote-mobile-control"
     assert_contains "$output_log" "Default native package mode includes codex-update-manager"
     assert_contains "$output_log" "make install-native"
-    assert_contains "$output_log" "Computer Use build plan: native backend=bundled; in-app UI=not configured"
+    assert_contains "$output_log" "Computer Use build plan: UI requested=not configured; native backend will be staged during the build"
     assert_contains "$output_log" "Bundled plugin and tool registration is refreshed only during a cold start"
 }
 
@@ -3813,8 +3813,12 @@ test_computer_use_optional_runtime_packaging() {
     assert_contains "$REPO_DIR/packaging/linux/codex-desktop.spec" "Recommends:.*xdotool"
     assert_not_contains "$REPO_DIR/packaging/linux/codex-desktop.spec" "Requires:.*xdotool"
     assert_contains "$REPO_DIR/packaging/linux/PKGBUILD.template" "xdotool: full-Unicode Computer Use text entry on X11"
-    assert_contains "$REPO_DIR/flake.nix" 'computerUseRuntimePath = pkgs.lib.makeBinPath \[ pkgs.xdotool \]'
-    assert_contains "$REPO_DIR/flake.nix" 'optionalString enableComputerUseUi ":${computerUseRuntimePath}"'
+    local launcher_path_body
+    launcher_path_body="$(sed -n '/launcherPath = pkgs.lib.makeBinPath/,/]);/p' "$REPO_DIR/flake.nix")"
+    [[ "$launcher_path_body" == *xdotool* ]] \
+        || fail "Expected the unconditional Nix launcher PATH to include xdotool"
+    assert_not_contains "$REPO_DIR/flake.nix" "computerUseRuntimePath"
+    assert_not_contains "$REPO_DIR/flake.nix" 'optionalString enableComputerUseUi.*xdotool'
 }
 
 test_setup_native_wizard_cleanup_requires_interactive_confirmation() {
@@ -4755,7 +4759,7 @@ test_bundled_plugin_builders_accept_prebuilt_binaries() {
     assert_contains "$output_log" "$backend"
     assert_contains "$output_log" "$cosmic"
     assert_contains "$output_log" "$host"
-    assert_contains "$output_log" "Computer Use build: native backend=bundled; in-app UI=enabled"
+    assert_contains "$output_log" "Computer Use build: UI requested=enabled; backend staged=yes"
     assert_contains "$output_log" "fully quit and reopen the app once"
     cmp -s "$chatgpt_icon" "$staged_plugins/computer-use/assets/app-icon.png" \
         || fail "Expected the bundled Computer Use plugin to use the selected ChatGPT icon"
@@ -6120,7 +6124,7 @@ EOF
     assert_contains "$REPO_DIR/scripts/lib/process-detection.sh" "assert_install_target_not_running"
     assert_contains "$REPO_DIR/scripts/lib/process-detection.sh" "find_running_install_target_pid"
     assert_contains "$REPO_DIR/scripts/lib/process-detection.sh" "ChatGPT Desktop is currently running from"
-    assert_contains "$REPO_DIR/launcher/start.sh.template" "abort_if_running_app_needs_restart"
+    assert_contains "$REPO_DIR/launcher/start.sh.template" "abort_if_stale_install_main_process_is_running"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "refresh bundled plugin/tool registration"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "prompt_install_missing_cli"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "prompt-install-cli"
@@ -6678,7 +6682,7 @@ test_process_detection_helper_cmdline_shapes() {
 }
 
 test_process_detection_finds_replaced_running_app() {
-    info "Checking installed-app detection after an executable is replaced"
+    info "Checking post-install restart warnings require an old executable inode"
     local workspace="$TMP_DIR/replaced-running-app"
     local install_dir="$workspace/codex-app"
     local output_log="$workspace/output.log"
@@ -6697,8 +6701,8 @@ test_process_detection_finds_replaced_running_app() {
         wait "$running_pid" 2>/dev/null || true
         fail "Test Electron fixture did not start"
     }
-    mv "$install_dir/electron" "$install_dir/electron.previous"
-    cp "$TRUE_BIN" "$install_dir/electron"
+    cp "$TRUE_BIN" "$install_dir/electron.new"
+    mv -f "$install_dir/electron.new" "$install_dir/electron"
 
     (
         INSTALL_DIR="$install_dir"
@@ -6718,6 +6722,93 @@ test_process_detection_finds_replaced_running_app() {
     wait "$running_pid" 2>/dev/null || true
     assert_contains "$output_log" "process predates the package just installed"
     assert_contains "$output_log" "Fully quit it, then reopen the app"
+
+    cp "$(type -P sleep)" "$install_dir/electron"
+    "$install_dir/electron" 30 &
+    running_pid=$!
+    for _attempt in $(seq 1 50); do
+        [ "$(readlink "/proc/$running_pid/exe" 2>/dev/null || true)" = "$install_dir/electron" ] && break
+        sleep 0.01
+    done
+    : > "$output_log"
+    (
+        INSTALL_DIR="$install_dir"
+        CODEX_APP_ID="codex-desktop"
+        CODEX_APP_DISPLAY_NAME="ChatGPT Desktop"
+        # shellcheck disable=SC1091
+        source "$REPO_DIR/scripts/lib/process-detection.sh"
+        [ "$(find_running_install_target_pid)" = "$running_pid" ]
+        ! pid_requires_install_restart "$running_pid" "$install_dir/electron"
+        warn_if_running_install_requires_restart
+    ) >"$output_log" 2>&1 || {
+        kill "$running_pid" 2>/dev/null || true
+        wait "$running_pid" 2>/dev/null || true
+        fail "Current installed executable was not recognized"
+    }
+    kill "$running_pid" 2>/dev/null || true
+    wait "$running_pid" 2>/dev/null || true
+    [ ! -s "$output_log" ] || fail "Current executable produced a false restart warning: $(cat "$output_log")"
+}
+
+test_launcher_stale_install_scan_ignores_pid_markers_and_side_by_side_apps() {
+    info "Checking launcher stale-install preflight scans independently and preserves side-by-side installs"
+    local workspace="$TMP_DIR/launcher-stale-install-scan"
+    local app_dir="$workspace/app"
+    local other_dir="$workspace/other-app"
+    local function_file="$workspace/process-functions.sh"
+    local stale_marker="$workspace/app.pid"
+    local running_pid
+
+    mkdir -p "$app_dir" "$other_dir"
+    awk '
+        /^pid_is_current_user\(\) \{/ { copy=1 }
+        /^pid_in_same_launch_instance\(\) \{/ { copy=0 }
+        copy { print }
+    ' "$REPO_DIR/launcher/start.sh.template" > "$function_file"
+    # shellcheck source=/dev/null
+    source "$function_file"
+    SCRIPT_DIR="$app_dir"
+    printf '%s\n' '999999999' > "$stale_marker"
+    APP_PID_FILE="$stale_marker"
+
+    cp "$(type -P sleep)" "$app_dir/electron"
+    "$app_dir/electron" 30 &
+    running_pid=$!
+    for _attempt in $(seq 1 50); do
+        [ "$(readlink "/proc/$running_pid/exe" 2>/dev/null || true)" = "$app_dir/electron" ] && break
+        sleep 0.01
+    done
+    cp "$TRUE_BIN" "$app_dir/electron.new"
+    mv -f "$app_dir/electron.new" "$app_dir/electron"
+    [ "$(find_stale_install_main_process_pid)" = "$running_pid" ] || {
+        kill "$running_pid" 2>/dev/null || true
+        wait "$running_pid" 2>/dev/null || true
+        fail "Launcher preflight missed a stale install when app.pid was unusable"
+    }
+    kill "$running_pid" 2>/dev/null || true
+    wait "$running_pid" 2>/dev/null || true
+
+    cp "$(type -P sleep)" "$other_dir/electron"
+    "$other_dir/electron" 30 &
+    running_pid=$!
+    for _attempt in $(seq 1 50); do
+        [ "$(readlink "/proc/$running_pid/exe" 2>/dev/null || true)" = "$other_dir/electron" ] && break
+        sleep 0.01
+    done
+    [ "$(readlink "/proc/$running_pid/exe" 2>/dev/null || true)" = "$other_dir/electron" ] || {
+        kill "$running_pid" 2>/dev/null || true
+        wait "$running_pid" 2>/dev/null || true
+        fail "Side-by-side Electron fixture did not start"
+    }
+    cp "$TRUE_BIN" "$other_dir/electron.new"
+    mv -f "$other_dir/electron.new" "$other_dir/electron"
+    if find_stale_install_main_process_pid >/dev/null; then
+        kill "$running_pid" 2>/dev/null || true
+        wait "$running_pid" 2>/dev/null || true
+        fail "Launcher preflight treated a side-by-side install as this install"
+    fi
+    kill "$running_pid" 2>/dev/null || true
+    wait "$running_pid" 2>/dev/null || true
 }
 
 test_side_by_side_launcher_identity() {
@@ -9739,6 +9830,7 @@ main() {
     test_webview_server_cache_policy
     test_process_detection_helper_cmdline_shapes
     test_process_detection_finds_replaced_running_app
+    test_launcher_stale_install_scan_ignores_pid_markers_and_side_by_side_apps
     test_webview_probe_equivalence
     test_side_by_side_launcher_identity
     test_linux_file_manager_patch_smoke

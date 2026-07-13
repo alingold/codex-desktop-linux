@@ -1651,7 +1651,7 @@ install_bundled_plugin_resources() {
     info "Linux-safe bundled plugins installed"
 }
 
-computer_use_ui_build_state() {
+computer_use_ui_requested_state() {
     if node -e \
         'process.exit(require(process.argv[1]).isComputerUseUiEnabled() ? 0 : 1)' \
         "$SCRIPT_DIR/scripts/patches/impl/computer-use.js"; then
@@ -1667,11 +1667,11 @@ print_linux_computer_use_build_summary() {
     local cosmic_helper="$plugin_dir/bin/codex-computer-use-cosmic"
     local ui_state
 
-    ui_state="$(computer_use_ui_build_state)"
-    if [ -x "$backend" ] && [ -x "$cosmic_helper" ]; then
-        info "Computer Use build: native backend=bundled; in-app UI=$ui_state"
+    ui_state="$(computer_use_ui_requested_state)"
+    if [ -f "$backend" ] && [ -f "$cosmic_helper" ]; then
+        info "Computer Use build: UI requested=$ui_state; backend staged=yes"
     else
-        warn "Computer Use build: native backend=unavailable; in-app UI=$ui_state"
+        warn "Computer Use build: UI requested=$ui_state; backend staged=no"
     fi
     info "Computer Use input runtime: host-selected (/dev/uinput, desktop portal, xdotool, or ydotool); optional host helpers are not embedded in native packages"
     info "Computer Use activation: after installing this build, fully quit and reopen the app once so the bundled plugin and tool schema register during cold startup"

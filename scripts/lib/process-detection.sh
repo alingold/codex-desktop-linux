@@ -62,10 +62,64 @@ pid_matches_install_target() {
     ! pid_is_electron_helper "$pid"
 }
 
+pid_executable_identity() {
+    local path="$1"
+    stat -Lc '%d:%i' "$path" 2>/dev/null
+}
+
+pid_requires_install_restart() {
+    local pid="$1"
+    local expected="$2"
+    local first_identity=""
+    local second_identity=""
+    local installed_identity=""
+
+    pid_matches_install_target "$pid" "$expected" || return 1
+    first_identity="$(pid_executable_identity "/proc/$pid/exe" || true)"
+    installed_identity="$(pid_executable_identity "$expected" || true)"
+    [ -n "$first_identity" ] && [ -n "$installed_identity" ] || return 1
+    [ "$first_identity" != "$installed_identity" ] || return 1
+
+    # Revalidate after reading procfs so a PID reused by a newly launched app
+    # cannot inherit the stale result from the process that previously held it.
+    pid_matches_install_target "$pid" "$expected" || return 1
+    second_identity="$(pid_executable_identity "/proc/$pid/exe" || true)"
+    [ "$second_identity" = "$first_identity" ] && [ "$second_identity" != "$installed_identity" ]
+}
+
+find_stale_install_target_pid() {
+    local electron_path="$INSTALL_DIR/electron"
+    local app_pid_file="${XDG_STATE_HOME:-$HOME/.local/state}/$CODEX_APP_ID/app.pid"
+    local pid=""
+    local proc_cmdline
+
+    [ -e "$electron_path" ] || return 1
+
+    if [ -f "$app_pid_file" ]; then
+        pid="$(cat "$app_pid_file" 2>/dev/null || true)"
+        if pid_requires_install_restart "$pid" "$electron_path"; then
+            printf '%s\n' "$pid"
+            return 0
+        fi
+    fi
+
+    for proc_cmdline in /proc/[0-9]*/cmdline; do
+        [ -r "$proc_cmdline" ] || continue
+        pid="${proc_cmdline#/proc/}"
+        pid="${pid%/cmdline}"
+        if pid_requires_install_restart "$pid" "$electron_path"; then
+            printf '%s\n' "$pid"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 warn_if_running_install_requires_restart() {
     local pid=""
 
-    if pid="$(find_running_install_target_pid)"; then
+    if pid="$(find_stale_install_target_pid)"; then
         printf '%s\n' \
             "[WARN] $CODEX_APP_DISPLAY_NAME is still running from $INSTALL_DIR (pid $pid)." \
             "[WARN] That process predates the package just installed. Fully quit it, then reopen the app so bundled plugins and tools are registered from the new build." >&2
@@ -76,7 +130,7 @@ find_running_install_target_pid() {
     local electron_path="$INSTALL_DIR/electron"
     local app_pid_file="${XDG_STATE_HOME:-$HOME/.local/state}/$CODEX_APP_ID/app.pid"
     local pid
-    local proc_exe
+    local proc_cmdline
 
     [ -e "$electron_path" ] || return 1
 
@@ -88,10 +142,10 @@ find_running_install_target_pid() {
         fi
     fi
 
-    for proc_exe in /proc/[0-9]*/exe; do
-        [ -e "$proc_exe" ] || continue
-        pid="${proc_exe#/proc/}"
-        pid="${pid%/exe}"
+    for proc_cmdline in /proc/[0-9]*/cmdline; do
+        [ -r "$proc_cmdline" ] || continue
+        pid="${proc_cmdline#/proc/}"
+        pid="${pid%/cmdline}"
         if pid_matches_install_target "$pid" "$electron_path"; then
             echo "$pid"
             return 0

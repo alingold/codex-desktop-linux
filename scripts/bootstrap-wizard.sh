@@ -1286,7 +1286,7 @@ run_feature_cleanup() {
 }
 
 print_package_mode_guidance() {
-    info "Computer Use build plan: native backend=bundled; in-app UI=$(computer_use_ui_state)"
+    info "Computer Use build plan: UI requested=$(computer_use_ui_state); native backend will be staged during the build"
     info "After installing, fully quit and reopen ChatGPT Desktop once. Bundled plugin and tool registration is refreshed only during a cold start."
     if package_with_updater_enabled; then
         info "Default native package mode includes codex-update-manager."
