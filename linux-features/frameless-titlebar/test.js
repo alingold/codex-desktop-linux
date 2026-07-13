@@ -10,11 +10,13 @@ const test = require("node:test");
 const {
   loadLinuxFeaturePatchDescriptors,
 } = require("../../scripts/lib/linux-features.js");
+const { patchAssetFiles } = require("../../scripts/patches/lib/assets.js");
 const {
   applyFramelessTitlebarBranchPatch,
   applyFramelessTitlebarMainPatch,
   applyFramelessTitlebarOverlaySyncPatch,
   applyFramelessTitlebarWebviewPatch,
+  descriptors,
 } = require("./patch.js");
 
 function applyPatchTwice(patchFn, source) {
@@ -66,24 +68,17 @@ test("frameless-titlebar stays disabled until listed in features.json", () => {
       (descriptor) => descriptor.id === "feature:frameless-titlebar:webview-window-controls-layout",
     );
     assert.match(
+      "app-initial~app-main~onboarding-page-D9sPBwim.js",
+      webviewPatch.pattern,
+    );
+    assert.match(
+      "app-initial~app-main~new-thread-panel-page~onboarding-page~login-route~appgen-library-page~~gpgl9un5-_t04Xpau.js",
+      webviewPatch.pattern,
+    );
+    assert.doesNotMatch(
       "app-initial~app-main~new-thread-panel-page~appgen-library-page~hotkey-window-thread-page~ho~iufn7mg3-abc.js",
       webviewPatch.pattern,
     );
-    assert.doesNotMatch(
-      "app-initial~app-main~onboarding-page~hotkey-window-thread-page~quick-chat-window-page~chatg~k0ede4gb-abc.js",
-      webviewPatch.pattern,
-    );
-    assert.doesNotMatch(
-      "app-initial~app-main~pull-request-code-review~onboarding-page~hotkey-window-thread-page~cha~b76hmflu-abc.js",
-      webviewPatch.pattern,
-    );
-    assert.doesNotMatch(
-      "app-initial~app-main~onboarding-page~hotkey-window-thread-page~quick-chat-window-page~chatg~duyd76c5-abc.js",
-      webviewPatch.pattern,
-    );
-    assert.doesNotMatch("app-initial~app-main~onboarding-page-abc.js", webviewPatch.pattern);
-    assert.doesNotMatch("use-window-controls-safe-area-abc.js", webviewPatch.pattern);
-    assert.doesNotMatch("app-initial~app-main~onboarding-page~debug-window-page-abc.js", webviewPatch.pattern);
     assert.doesNotMatch("app-main-abc.js", webviewPatch.pattern);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
@@ -197,6 +192,53 @@ test("frameless-titlebar maps Linux window controls chrome to native webview lay
   assert.doesNotMatch(patchedLayout, /function Nvt\(\)\{return [^}]*showApplicationMenu/);
   assert.doesNotMatch(patchedLayout, /includes\(`linux`\)\?t\?\?eV\.applicationMenu/);
   assert.doesNotMatch(patchedLayout, /right:138/);
+});
+
+test("frameless-titlebar descriptor patches the current split chrome bundles", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "frameless-titlebar-assets-"));
+  try {
+    const assetsDir = path.join(tempDir, "webview", "assets");
+    const layoutPath = path.join(
+      assetsDir,
+      "app-initial~app-main~onboarding-page-D9sPBwim.js",
+    );
+    const chromePath = path.join(
+      assetsDir,
+      "app-initial~app-main~new-thread-panel-page~onboarding-page~login-route~appgen-library-page~~gpgl9un5-_t04Xpau.js",
+    );
+    const layoutSource = [
+      "var eD=Object.freeze({default:Object.freeze({left:0,right:0}),applicationMenu:Object.freeze({left:0,right:0})});",
+      "function DE(){return ba()&&window.electronBridge?.showApplicationMenu!=null}",
+      "function oLe(){if(!DE())return null;let i=window.electronBridge?.showApplicationMenu;return i}",
+      "function ALe(e,t,n){let i=navigator.platform,r=navigator.userAgent;return i.includes(`macintosh`)?e:i.includes(`win`)||r.includes(`windows`)||i.includes(`linux`)?t??eD.applicationMenu:eD.default}",
+    ].join("");
+    const chromeSource = [
+      "function jLe(e,t){if(e!==`electron`)return`native`;switch(t){case`win32`:case`linux`:return`application-menu`;case`darwin`:case`unknown`:return`native`}}",
+      "function MLe(){return document.documentElement.dataset.codexWindowChrome===`application-menu`}",
+    ].join("");
+    fs.mkdirSync(assetsDir, { recursive: true });
+    fs.writeFileSync(layoutPath, layoutSource);
+    fs.writeFileSync(chromePath, chromeSource);
+
+    let result;
+    const warnings = captureWarnings(() => {
+      result = patchAssetFiles(tempDir, descriptors[1].pattern, descriptors[1].apply, "missing");
+    });
+    const patchedLayout = fs.readFileSync(layoutPath, "utf8");
+    const patchedChrome = fs.readFileSync(chromePath, "utf8");
+
+    assert.deepEqual(warnings, []);
+    assert.deepEqual(result, { matched: 2, changed: 2 });
+    assert.match(patchedLayout, /function DE\(\)\{return!1\}/);
+    assert.doesNotMatch(patchedLayout, /includes\(`linux`\)\?t\?\?eD\.applicationMenu/);
+    assert.match(patchedChrome, /case`win32`:return`application-menu`;case`linux`:return`native`/);
+    assert.deepEqual(
+      patchAssetFiles(tempDir, descriptors[1].pattern, descriptors[1].apply, "missing"),
+      { matched: 2, changed: 0 },
+    );
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("frameless-titlebar reports each current webview sub-contract drift", () => {

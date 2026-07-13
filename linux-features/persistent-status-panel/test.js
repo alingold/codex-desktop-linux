@@ -84,7 +84,7 @@ test("descriptor patches the current app-initial composer status bundle", () => 
     const assetsDir = path.join(tempDir, "webview", "assets");
     const assetPath = path.join(
       assetsDir,
-      "app-initial~app-main~new-thread-panel-page~appgen-library-page~hotkey-window-thread-page~ho~iufn7mg3-MXsOJYYa.js",
+      "app-initial~app-main~page-CMpPiY3-.js",
     );
     fs.mkdirSync(assetsDir, { recursive: true });
     fs.writeFileSync(assetPath, currentComposerSource);
@@ -96,6 +96,10 @@ test("descriptor patches the current app-initial composer status bundle", () => 
     assert.match(patched, new RegExp(`localStorage\\.getItem\\(\\\`${STORAGE_KEY}\\\`\\)`));
     assert.match(patched, new RegExp(`localStorage\\.setItem\\(\\\`${STORAGE_KEY}\\\`,\\\`1\\\`\\)`));
     assert.match(patched, new RegExp(`localStorage\\.removeItem\\(\\\`${STORAGE_KEY}\\\`\\)`));
+    assert.doesNotMatch(
+      "app-initial~app-main~new-thread-panel-page~appgen-library-page~hotkey-window-thread-page~ho~iufn7mg3-MXsOJYYa.js",
+      descriptors[0].pattern,
+    );
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
