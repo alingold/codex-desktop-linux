@@ -14,30 +14,6 @@ function warn(message, patchName) {
   console.warn(`WARN: ${message} - skipping ${patchName}`);
 }
 
-function applyLinuxAppshotAvailabilityPatch(currentSource) {
-  if (currentSource.includes("!==`linux`&&(") && currentSource.includes("!==`macOS`||")) {
-    return currentSource;
-  }
-
-  let changed = false;
-  const patchedSource = currentSource.replace(
-    /if\(([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)!==`macOS`\|\|!([A-Za-z_$][\w$]*)\(([^)]*?)\)\)return!1;/g,
-    (match, platformGetFn, platformAtomVar, flagGetFn, flagArgs) => {
-      changed = true;
-      return `if(${platformGetFn}(${platformAtomVar})!==\`linux\`&&(${platformGetFn}(${platformAtomVar})!==\`macOS\`||!${flagGetFn}(${flagArgs})))return!1;`;
-    },
-  );
-
-  if (changed) {
-    return patchedSource;
-  }
-
-  if (currentSource.includes("macOS") || currentSource.includes("appshot")) {
-    warn("Could not find AppShots availability gate", "Linux AppShots availability patch");
-  }
-  return currentSource;
-}
-
 function applyLinuxAppshotMainProcessPatch(currentSource) {
   if (currentSource.includes(APPSHOT_HELPER_MARKER)) {
     return currentSource;
@@ -339,15 +315,6 @@ const descriptors = [
     apply: applyLinuxAppshotMainProcessPatch,
   },
   {
-    id: "linux-appshots-availability",
-    phase: "webview-asset",
-    order: 1090,
-    pattern: /^app-initial~app-main~page-[^.]+\.js$/,
-    missingDescription: "AppShots availability bundle",
-    skipDescription: "Linux AppShots availability patch",
-    apply: applyLinuxAppshotAvailabilityPatch,
-  },
-  {
     id: "linux-appshots-hotkey",
     phase: "main-bundle",
     order: 143,
@@ -365,7 +332,6 @@ const descriptors = [
 ];
 
 module.exports = {
-  applyLinuxAppshotAvailabilityPatch,
   applyLinuxAppshotHotkeyPatch,
   applyLinuxAppshotMainProcessPatch,
   applyLinuxAppshotSettingsHotkeyPatch,

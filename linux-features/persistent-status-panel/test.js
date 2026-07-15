@@ -78,13 +78,13 @@ test("status panel preference survives component remounts", () => {
   assert.equal(applyPersistentStatusPanelPatch(patched), patched);
 });
 
-test("descriptor patches the current app-initial composer status bundle", () => {
+test("descriptor patches the current composer status bundle", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "persistent-status-panel-assets-"));
   try {
     const assetsDir = path.join(tempDir, "webview", "assets");
     const assetPath = path.join(
       assetsDir,
-      "app-initial~app-main~page-CMpPiY3-.js",
+      "app-initial~app-main~new-thread-panel-page~appgen-library-page~hotkey-window-thread-page~ho~iufn7mg3-MXsOJYYa.js",
     );
     fs.mkdirSync(assetsDir, { recursive: true });
     fs.writeFileSync(assetPath, currentComposerSource);
@@ -97,7 +97,7 @@ test("descriptor patches the current app-initial composer status bundle", () => 
     assert.match(patched, new RegExp(`localStorage\\.setItem\\(\\\`${STORAGE_KEY}\\\`,\\\`1\\\`\\)`));
     assert.match(patched, new RegExp(`localStorage\\.removeItem\\(\\\`${STORAGE_KEY}\\\`\\)`));
     assert.doesNotMatch(
-      "app-initial~app-main~new-thread-panel-page~appgen-library-page~hotkey-window-thread-page~ho~iufn7mg3-MXsOJYYa.js",
+      "app-initial~app-main~settings-page-CkOIN2He.js",
       descriptors[0].pattern,
     );
   } finally {
