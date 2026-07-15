@@ -18,6 +18,7 @@ mod terminal;
 mod windowing;
 mod windows;
 pub mod x11_clipboard;
+mod ydotool;
 
 use anyhow::{Context, Result};
 

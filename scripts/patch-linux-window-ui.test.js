@@ -1425,7 +1425,7 @@ function keybindsIndexBundleFixture() {
   return [
     'import{n as routeModule,s as routeToESM}from"./rolldown-runtime-A.js";',
     'import{I as routeJsxFactory,R as routeReactFactory}from"./shared-runtime-A.js";',
-    "function SettingsRouteWrapper(){let t=(0,RouteReact.useState)(null);return (0,RouteJsx.jsx)(`div`,{children:t})}",
+    "function Z(e){let r=(0,RouteReact.lazy)(e);function SettingsRouteWrapper(){let t=(0,RouteReact.useState)(null);return (0,RouteJsx.jsx)(r,{children:t})}return SettingsRouteWrapper}",
     "var RouteReact,RouteJsx;routeModule(()=>{RouteReact=routeToESM(routeReactFactory(),1),RouteJsx=routeJsxFactory()})();",
     "var Kge={\"general-settings\":xh,appearance:Pf,\"git-settings\":t1};",
     "var i_e={\"general-settings\":Z(async()=>(await s(async()=>{let{GeneralSettings:e}=await import(`./general-settings-DsLl9t6Z.js`);return{GeneralSettings:e}},[],import.meta.url)).GeneralSettings),appearance:Z(async()=>(await s(async()=>{let{Appearance:e}=await import(`./appearance.js`);return{Appearance:e}},[],import.meta.url)).Appearance)};",
@@ -1459,7 +1459,7 @@ function linuxDesktopRouteBundleFixture() {
   return [
     'import{n as routeModule,s as routeToESM}from"./rolldown-runtime-A.js";',
     'import{I as routeJsxFactory,R as routeReactFactory}from"./shared-runtime-A.js";',
-    "function SettingsRouteWrapper(){let t=(0,RouteReact.useState)(null);return (0,RouteJsx.jsx)(`div`,{children:t})}",
+    "function $(e){let r=(0,RouteReact.lazy)(e);function SettingsRouteWrapper(){let t=(0,RouteReact.useState)(null);return (0,RouteJsx.jsx)(r,{children:t})}return SettingsRouteWrapper}",
     "var RouteReact,RouteJsx;routeModule(()=>{RouteReact=routeToESM(routeReactFactory(),1),RouteJsx=routeJsxFactory()})();",
     "var DE={",
     '"general-settings":$(async()=>(await Xr(async()=>{let{GeneralSettings:e}=await import(`./general-settings-A.js`);return{GeneralSettings:e}},[],import.meta.url)).GeneralSettings),',
@@ -1524,7 +1524,10 @@ function createModernNativeKeyboardShortcutsSettingsFixture() {
     [
       'import{n as routeModule,s as routeToESM}from"./rolldown-runtime-A.js";',
       'import{I as routeJsxFactory,R as routeReactFactory}from"./shared-runtime-A.js";',
-      "function SettingsRouteWrapper(){let t=(0,RouteReact.useState)(null);return (0,RouteJsx.jsx)(`div`,{children:t})}",
+      "function DecoyState(){let t=(0,DecoyReact.useState)(null);return t}",
+      "function DecoyView(){return (0,DecoyJsx.jsx)(`div`,{})}",
+      "var DecoyReact,DecoyJsx;routeModule(()=>{DecoyReact=routeToESM(routeReactFactory(),1)});routeModule(()=>{DecoyJsx=routeJsxFactory()})();",
+      "function Ya(e){let r=(0,RouteReact.lazy)(e);function SettingsRouteWrapper(){let t=(0,RouteReact.useState)(null);return (0,RouteJsx.jsx)(r,{children:t})}return SettingsRouteWrapper}",
       "var RouteReact,RouteJsx;routeModule(()=>{RouteReact=routeToESM(routeReactFactory(),1),RouteJsx=routeJsxFactory()})();",
       'var Zn={"general-settings":Ya(async()=>(await Pr(async()=>{let{GeneralSettings:e}=await import(`./general-settings-A.js`);return{GeneralSettings:e}},[],import.meta.url)).GeneralSettings),"keyboard-shortcuts":Ya(async()=>(await Pr(async()=>{let{KeyboardShortcutsSettings:e}=await import(`./keyboard-shortcuts-settings-A.js`);return{KeyboardShortcutsSettings:e}},[],import.meta.url)).KeyboardShortcutsSettings)};',
       'var Hn={"general-settings":wt,"keyboard-shortcuts":xn};',
@@ -1645,7 +1648,7 @@ function createSplitRouteNativeKeyboardShortcutsSettingsFixture({
     [
       'import{n as routeModule,s as routeToESM}from"./rolldown-runtime-A.js";',
       'import{I as routeJsxFactory,R as routeReactFactory}from"./shared-runtime-A.js";',
-      "function SettingsRouteWrapper(){let t=(0,RouteReact.useState)(null);return (0,RouteJsx.jsx)(`div`,{children:t})}",
+      "function Ya(e){let r=(0,RouteReact.lazy)(e);function SettingsRouteWrapper(){let t=(0,RouteReact.useState)(null);return (0,RouteJsx.jsx)(r,{children:t})}return SettingsRouteWrapper}",
       "var RouteReact,RouteJsx;routeModule(()=>{RouteReact=routeToESM(routeReactFactory(),1),RouteJsx=routeJsxFactory()})();",
       "var Bn,Ya,Pr,FW,Xn=e((()=>{Bn=s(),Ya=t(f(),1),Pr=o(),",
       'FW={"general-settings":Ya(async()=>(await Pr(async()=>{let{GeneralSettings:e}=await import(`./general-settings-A.js`);return{GeneralSettings:e}},[],import.meta.url)).GeneralSettings),',
@@ -5032,6 +5035,10 @@ test("renders the generated Linux desktop settings page with working switches", 
       routeSettingsSource,
       /RouteReact as codexLinuxReact,RouteJsx as codexLinuxJsx/,
     );
+    assert.doesNotMatch(
+      routeSettingsSource,
+      /DecoyReact as codexLinuxReact|DecoyJsx as codexLinuxJsx/,
+    );
     const nativeRuntime = { React, $: jsxRuntime };
     assert.equal(nativeRuntime.React, React);
     assert.equal(nativeRuntime.$, jsxRuntime);
@@ -5182,7 +5189,7 @@ test("writes only missing Linux settings fallback components after required chec
     assert.equal(fs.existsSync(path.join(assetsDir, "linux-settings-group-linux.js")), false);
     assert.match(
       fs.readFileSync(path.join(assetsDir, linuxDesktopSettingsAsset), "utf8"),
-      /import\{n as SettingsRow\}from"\.\/linux-settings-row-linux\.js"/,
+      /import\{n as SettingsRow\}from"\.\/linux-settings-row-linux\.js\?v=[a-f0-9]{12}"/,
     );
 
     const settingsPageSource = fs.readFileSync(
@@ -5211,7 +5218,7 @@ test("uses a themed fallback toggle when upstream settings toggle is unavailable
       path.join(assetsDir, linuxDesktopSettingsAsset),
       "utf8",
     );
-    assert.match(linuxDesktopSource, /import\{t as Toggle\}from"\.\/linux-settings-toggle-linux\.js"/);
+    assert.match(linuxDesktopSource, /import\{t as Toggle\}from"\.\/linux-settings-toggle-linux\.js\?v=[a-f0-9]{12}"/);
     assert.match(
       linuxDesktopSource,
       /control:\$\.jsx\(Toggle,\{checked:value,disabled:isLoading,onChange:this\.update,ariaLabel:label\}\)/,
@@ -5266,11 +5273,11 @@ test("ignores settings row and toggle icon decoys from the current DMG", () => {
     );
     assert.match(
       linuxDesktopSource,
-      /import\{n as SettingsRow\}from"\.\/linux-settings-row-linux\.js"/,
+      /import\{n as SettingsRow\}from"\.\/linux-settings-row-linux\.js\?v=[a-f0-9]{12}"/,
     );
     assert.match(
       linuxDesktopSource,
-      /import\{t as Toggle\}from"\.\/linux-settings-toggle-linux\.js"/,
+      /import\{t as Toggle\}from"\.\/linux-settings-toggle-linux\.js\?v=[a-f0-9]{12}"/,
     );
     assert.doesNotMatch(linuxDesktopSource, /settings-row-disclosure-A\.js/);
     assert.doesNotMatch(linuxDesktopSource, /toggle-left-A\.js/);
@@ -5302,7 +5309,7 @@ test("does not import an upstream settings toggle with private lazy initializati
     );
     assert.match(
       linuxDesktopSource,
-      /import\{t as Toggle\}from"\.\/linux-settings-toggle-linux\.js"/,
+      /import\{t as Toggle\}from"\.\/linux-settings-toggle-linux\.js\?v=[a-f0-9]{12}"/,
     );
     assert.doesNotMatch(linuxDesktopSource, /shared-toggle-A\.js/);
     assert.match(
@@ -5376,11 +5383,33 @@ test("adds Linux desktop settings when native shortcuts use a consolidated setti
     );
     assert.match(
       linuxDesktopSource,
-      /import\{t as Toggle\}from"\.\/linux-settings-toggle-linux\.js"/,
+      /import\{t as Toggle\}from"\.\/linux-settings-toggle-linux\.js\?v=[a-f0-9]{12}"/,
     );
     assert.doesNotMatch(linuxDesktopSource, /function LinuxSwitch/);
 
     const settingsPageSource = fs.readFileSync(path.join(assetsDir, "settings-page-A.js"), "utf8");
+    const linuxDesktopDigest = crypto
+      .createHash("sha256")
+      .update(linuxDesktopSource)
+      .digest("hex")
+      .slice(0, 12);
+    assert.match(
+      settingsPageSource,
+      new RegExp(`linux-desktop-settings-linux\\.js\\?v=${linuxDesktopDigest}`),
+    );
+    const fallbackToggleSource = fs.readFileSync(
+      path.join(assetsDir, "linux-settings-toggle-linux.js"),
+      "utf8",
+    );
+    const fallbackToggleDigest = crypto
+      .createHash("sha256")
+      .update(fallbackToggleSource)
+      .digest("hex")
+      .slice(0, 12);
+    assert.match(
+      linuxDesktopSource,
+      new RegExp(`linux-settings-toggle-linux\\.js\\?v=${fallbackToggleDigest}`),
+    );
     assert.match(settingsPageSource, /linux-desktop-settings-linux\.js/);
     assert.match(settingsPageSource, /"linux-desktop":[A-Za-z_$][\w$]*,"general-settings"/);
     assert.match(settingsPageSource, /=\[`general-settings`,`linux-desktop`,`profile`/);
@@ -5427,7 +5456,7 @@ test("adds Linux desktop settings when the lazy route map is hoisted into a sepa
     );
     assert.match(
       linuxDesktopSource,
-      /import\{t as Toggle\}from"\.\/linux-settings-toggle-linux\.js"/,
+      /import\{t as Toggle\}from"\.\/linux-settings-toggle-linux\.js\?v=[a-f0-9]{12}"/,
     );
     assert.doesNotMatch(linuxDesktopSource, /function LinuxSwitch/);
 
@@ -5450,7 +5479,7 @@ test("adds Linux desktop settings when the lazy route map is hoisted into a sepa
     );
     assert.match(
       routeChunkSource,
-      /"linux-desktop":Ya\(async\(\)=>\(await Pr\(async\(\)=>\{let\{LinuxDesktopSettings:e\}=await import\(`\.\/linux-desktop-settings-linux\.js`\);return\{LinuxDesktopSettings:e\}\},\[\],import\.meta\.url\)\)\.LinuxDesktopSettings\),"general-settings":/,
+      /"linux-desktop":Ya\(async\(\)=>\(await Pr\(async\(\)=>\{let\{LinuxDesktopSettings:e\}=await import\(`\.\/linux-desktop-settings-linux\.js\?v=[a-f0-9]{12}`\);return\{LinuxDesktopSettings:e\}\},\[\],import\.meta\.url\)\)\.LinuxDesktopSettings\),"general-settings":/,
     );
 
     const secondResult = patchKeybindsSettingsAssets(extractedDir);
@@ -5486,7 +5515,7 @@ test("composes Linux desktop section metadata and route patches in the same asse
     const routeChunkSource = fs.readFileSync(routeChunkPath, "utf8");
     assert.match(
       routeChunkSource,
-      /"linux-desktop":Ya\(async\(\)=>\(await Pr\(async\(\)=>\{let\{LinuxDesktopSettings:e\}=await import\(`\.\/linux-desktop-settings-linux\.js`\);return\{LinuxDesktopSettings:e\}\},\[\],import\.meta\.url\)\)\.LinuxDesktopSettings\),"general-settings":/,
+      /"linux-desktop":Ya\(async\(\)=>\(await Pr\(async\(\)=>\{let\{LinuxDesktopSettings:e\}=await import\(`\.\/linux-desktop-settings-linux\.js\?v=[a-f0-9]{12}`\);return\{LinuxDesktopSettings:e\}\},\[\],import\.meta\.url\)\)\.LinuxDesktopSettings\),"general-settings":/,
     );
     assert.match(routeChunkSource, /Bj=`general-settings\.linux-desktop\.import\.profile\.keyboard-shortcuts/);
     assert.match(routeChunkSource, /Uj=\[\{slug:`general-settings`\},\{slug:`linux-desktop`\},\{slug:`import`\}/);
@@ -5514,7 +5543,7 @@ test("finds Linux desktop settings route map in hashed settings-page chunks", ()
     const routeChunkSource = fs.readFileSync(path.join(assetsDir, routeChunkName), "utf8");
     assert.match(
       routeChunkSource,
-      /"linux-desktop":Ya\(async\(\)=>\(await Pr\(async\(\)=>\{let\{LinuxDesktopSettings:e\}=await import\(`\.\/linux-desktop-settings-linux\.js`\);return\{LinuxDesktopSettings:e\}\},\[\],import\.meta\.url\)\)\.LinuxDesktopSettings\),"general-settings":/,
+      /"linux-desktop":Ya\(async\(\)=>\(await Pr\(async\(\)=>\{let\{LinuxDesktopSettings:e\}=await import\(`\.\/linux-desktop-settings-linux\.js\?v=[a-f0-9]{12}`\);return\{LinuxDesktopSettings:e\}\},\[\],import\.meta\.url\)\)\.LinuxDesktopSettings\),"general-settings":/,
     );
 
     const settingsPageSource = fs.readFileSync(path.join(assetsDir, "settings-page-A.js"), "utf8");
@@ -7517,6 +7546,8 @@ test("does not give synthetic Computer Use plugin cards an invalid marketplace d
 
   const patched = applyPatchTwice(applyLinuxComputerUseRendererAvailabilityPatch, source);
 
+  assert.match(patched, /marketplaceName:`openai-bundled`/);
+  assert.doesNotMatch(patched, /marketplaceName:`openai-curated`/);
   assert.match(patched, /marketplacePath:marketplacePath/);
   assert.doesNotMatch(patched, /marketplacePath:`openai-bundled\/plugins\/computer-use`/);
 });

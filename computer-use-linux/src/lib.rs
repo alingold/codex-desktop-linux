@@ -11,3 +11,4 @@ pub mod terminal;
 pub mod windowing;
 pub mod windows;
 pub mod x11_clipboard;
+pub(crate) mod ydotool;

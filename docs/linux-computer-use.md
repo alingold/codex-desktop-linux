@@ -13,9 +13,9 @@ It supports:
 
 - app listing and accessibility trees through AT-SPI
 - screenshots through GNOME Shell DBus, the Codex GNOME Shell extension, or XDG Desktop Portal
-- window listing and focusing on GNOME, KWin/Plasma, Hyprland, COSMIC, i3,
-  and EWMH-compliant X11 desktops including Cinnamon, MATE, and XFCE
-- keyboard, click, scroll, and drag input through `/dev/uinput`, XDG
+- window listing and focusing on GNOME, KWin/Plasma, Hyprland, Niri, COSMIC,
+  i3, and EWMH-compliant X11 desktops including Cinnamon, MATE, and XFCE
+- keyboard, text, click, scroll, and drag input through `/dev/uinput`, XDG
   RemoteDesktop portal, or `ydotool`
 - full-Unicode X11 text entry through a transactional native clipboard path;
   plain-text clipboard contents are restored and `xdotool` sends only the
@@ -73,6 +73,11 @@ formats, mixed/rich clipboards are deliberately left untouched. Non-ASCII
 `type_text` then returns an explicit error instead of silently degrading the
 clipboard; `set_value` remains available for an exposed editable AT-SPI field.
 
+Install `ydotool` 1.0 or newer when you need the fallback input path. Some
+Debian and Ubuntu releases still package the incompatible pre-1.0 CLI; the
+Computer Use readiness report detects and rejects it instead of sending unsafe
+input commands.
+
 ```bash
 # Debian / Ubuntu
 sudo apt install ydotool
@@ -115,6 +120,11 @@ or screenshots:
 - sway/wlroots: `xdg-desktop-portal-wlr`
 - Hyprland: `xdg-desktop-portal-hyprland`
 - GNOME: usually available by default
+
+Niri window listing and exact focus use the `niri` command and the active
+session's `NIRI_SOCKET`. The Computer Use backend hydrates `NIRI_SOCKET` for GUI
+starts, but the socket must still belong to the active Niri session and be
+reachable by the desktop user.
 
 ## Verify Readiness
 
