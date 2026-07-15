@@ -14,9 +14,10 @@ This feature is disabled by default. Enable it before building:
 }
 ```
 
-The feature is self-contained. It patches only the optional AppShots webview
-availability gate, the Electron main-process AppShots handlers, and the
-upstream AppShots hotkey settings row. It does not add AppShots-specific code
+The feature is self-contained. Upstream now sends the AppShots feature state
+to the desktop on every supported platform, so the feature only patches the
+Electron main-process handlers and upstream AppShots hotkey settings row. It
+does not add AppShots-specific code
 to `computer-use-linux`, core patch modules, default patch flow, or packaged
 runtime hooks.
 

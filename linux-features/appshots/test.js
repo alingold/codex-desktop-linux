@@ -13,7 +13,6 @@ const {
   loadLinuxFeaturePatchDescriptors,
 } = require("../../scripts/lib/linux-features.js");
 const {
-  applyLinuxAppshotAvailabilityPatch,
   applyLinuxAppshotHotkeyPatch,
   applyLinuxAppshotMainProcessPatch,
   applyLinuxAppshotSettingsHotkeyPatch,
@@ -38,17 +37,6 @@ function captureWarnings(callback) {
     console.warn = originalWarn;
   }
   return warnings;
-}
-
-function appshotAvailabilityAtomBundleFixture() {
-  return [
-    "import{c as e,l as t,t as n}from\"./app-scope.js\";",
-    "import{v as r}from\"./app-server-manager-signals.js\";",
-    "import{f as i}from\"./statsig.js\";",
-    "import{n as a}from\"./platform.js\";",
-    "import{c as o}from\"./config-queries.js\";",
-    "var s=t(n,(e,{get:t})=>{if(t(a)!==`macOS`||!t(i,`1304276663`))return!1;let{data:n}=t(o,{hostId:e});return n!=null&&n.requirements?.allowAppshots!==!1}),c=e(n,({get:e})=>e(s,e(r)));export{s as n,c as t};",
-  ].join("");
 }
 
 function appshotMainProcessBundleFixture() {
@@ -107,11 +95,10 @@ test("appshots stays disabled until listed in features.json", () => {
     fs.writeFileSync(configPath, '{"enabled":["appshots"]}\n');
     const loaded = loadLinuxFeaturePatchDescriptors({ featuresRoot });
 
-    assert.equal(loaded.length, 4);
+    assert.equal(loaded.length, 3);
     assert.deepEqual(
       loaded.map((descriptor) => descriptor.id).sort(),
       [
-        "feature:appshots:linux-appshots-availability",
         "feature:appshots:linux-appshots-hotkey",
         "feature:appshots:linux-appshots-main-process",
         "feature:appshots:linux-appshots-settings-hotkey",
@@ -129,27 +116,8 @@ test("appshots stays disabled until listed in features.json", () => {
 });
 
 test("appshots feature descriptors are optional", () => {
-  assert.equal(descriptors.length, 4);
+  assert.equal(descriptors.length, 3);
   assert.ok(descriptors.every((descriptor) => descriptor.ciPolicy == null));
-});
-
-test("appshots availability descriptor matches the current bundle", () => {
-  const descriptor = descriptors.find(
-    (descriptor) => descriptor.id === "linux-appshots-availability",
-  );
-
-  assert.equal(descriptor.pattern.test("appshot-availability-BoK-Z77O.js"), false);
-  assert.ok(
-    descriptor.pattern.test(
-      "app-initial~app-main~page-CMpPiY3-.js",
-    ),
-  );
-  assert.equal(
-    descriptor.pattern.test(
-      "app-initial~app-main~new-thread-panel-page~appgen-library-page~hotkey-window-thread-page~ho~iufn7mg3-DRU9Ekz0.js",
-    ),
-    false,
-  );
 });
 
 test("stages the Linux bare modifier monitor helper and Wayland portal hook", () => {
@@ -267,19 +235,6 @@ test("bare modifier monitor fails before ready when XInput2 exits during startup
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
-});
-
-test("enables AppShots availability atom on Linux", () => {
-  const patched = applyPatchTwice(
-    applyLinuxAppshotAvailabilityPatch,
-    appshotAvailabilityAtomBundleFixture(),
-  );
-
-  assert.match(
-    patched,
-    /if\(t\(a\)!==`linux`&&\(t\(a\)!==`macOS`\|\|!t\(i,`1304276663`\)\)\)return!1;/,
-  );
-  assert.match(patched, /requirements\?\.allowAppshots!==!1/);
 });
 
 test("finds only the raw renderer message sender", () => {
