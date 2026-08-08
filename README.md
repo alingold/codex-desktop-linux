@@ -1,5 +1,12 @@
 <h1 align="center">ChatGPT Desktop for Linux</h1>
 
+> [!WARNING]
+> **Deprecated and no longer maintained.** This experimental Linux fork is
+> archived for historical reference. It will not receive fixes, security
+> updates, or compatibility updates. Please use the actively maintained
+> [ilysenko/codex-desktop-linux](https://github.com/ilysenko/codex-desktop-linux)
+> project instead.
+
 <p align="center">
   <a href="https://github.com/alingold/codex-desktop-linux/actions/workflows/ci.yml"><img src="https://github.com/alingold/codex-desktop-linux/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/alingold/codex-desktop-linux/actions/workflows/upstream-build-app.yml"><img src="https://github.com/alingold/codex-desktop-linux/actions/workflows/upstream-build-app.yml/badge.svg" alt="Upstream Build App"></a>
